@@ -1,0 +1,40 @@
+{
+  "name": "send_media",
+  "version": 1,
+  "steps": [
+    {
+      "op": "share_media",
+      "goal": "Open the WhatsApp media composer for the shared photo or video",
+      "target": { "resourceId": "com.whatsapp:id/caption" }
+    },
+    {
+      "op": "ensure_view_once",
+      "goal": "Find the View Once button in the media composer",
+      "target": { "resourceId": "com.whatsapp:id/view_once_toggle" },
+      "onDesc": "Turn off view once",
+      "nux": { "resourceId": "com.whatsapp:id/vo_sp_bottom_sheet_ok_button" }
+    },
+    {
+      "op": "type_caption",
+      "goal": "Type the caption into the caption field",
+      "target": { "resourceId": "com.whatsapp:id/caption" }
+    },
+    {
+      "op": "check_recipient",
+      "recipients": { "resourceId": "com.whatsapp:id/recipients_scroller", "descPattern": "^1 selected recipient" }
+    },
+    {
+      "op": "send",
+      "goal": "Find the Send button in the media composer",
+      "target": { "resourceId": "com.whatsapp:id/send" }
+    },
+    {
+      "op": "confirm_sent",
+      "activity": "Conversation",
+      "mediaBubble": { "descPattern": "^(View once photo|View once video|Enlarge photo|Play video)" },
+      "status": { "resourceId": "com.whatsapp:id/status" },
+      "okStatus": ["Sent", "Delivered", "Read"],
+      "timeoutMs": 60000
+    }
+  ]
+}

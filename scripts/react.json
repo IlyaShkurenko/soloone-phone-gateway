@@ -1,0 +1,47 @@
+{
+  "name": "react",
+  "version": 1,
+  "steps": [
+    {
+      "op": "open_chat",
+      "goal": "Open the WhatsApp chat with the recipient and show the message input",
+      "target": { "resourceId": "com.whatsapp:id/entry" },
+      "header": { "resourceId": "com.whatsapp:id/conversation_contact_name" },
+      "notOnWhatsapp": { "textContains": "isn't on WhatsApp" }
+    },
+    {
+      "op": "find_message",
+      "goal": "Find the message bubble to react to",
+      "textBubble": { "resourceId": "com.whatsapp:id/message_text" },
+      "mediaBubble": { "descPattern": "^(View once photo|View once video|Enlarge photo|Play video)" },
+      "date": { "resourceId": "com.whatsapp:id/date" },
+      "maxScrolls": 4
+    },
+    {
+      "op": "check_recipient",
+      "header": { "resourceId": "com.whatsapp:id/conversation_contact_name" },
+      "activity": "Conversation"
+    },
+    {
+      "op": "open_reactions",
+      "tray": { "resourceId": "com.whatsapp:id/reactions_tray_recycler_view" }
+    },
+    {
+      "op": "choose_reaction",
+      "tray": { "resourceId": "com.whatsapp:id/reactions_tray_recycler_view" },
+      "more": { "resourceId": "com.whatsapp:id/reactions_plus_button_recent_reactions" },
+      "pickerEmoji": { "resourceId": "com.whatsapp:id/emoji" },
+      "search": { "resourceId": "com.whatsapp:id/search_button" },
+      "keywords": {
+        "👍": "thumbs up", "❤️": "red heart", "😂": "joy", "😮": "open mouth", "😢": "crying", "🙏": "folded hands",
+        "😁": "grin", "🔥": "fire", "👀": "eyes", "✅": "check mark", "👏": "clap", "🙌": "raising hands"
+      }
+    },
+    {
+      "op": "confirm_reaction",
+      "textBubble": { "resourceId": "com.whatsapp:id/message_text" },
+      "mediaBubble": { "descPattern": "^(View once photo|View once video|Enlarge photo|Play video)" },
+      "reactionChip": { "resourceId": "com.whatsapp:id/reactions_bubble_layout" }
+    }
+  ]
+}

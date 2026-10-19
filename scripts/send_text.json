@@ -1,0 +1,44 @@
+{
+  "name": "send_text",
+  "version": 1,
+  "steps": [
+    {
+      "op": "open_chat",
+      "goal": "Open the WhatsApp chat with the recipient and show the message input",
+      "target": { "resourceId": "com.whatsapp:id/entry" },
+      "header": { "resourceId": "com.whatsapp:id/conversation_contact_name" },
+      "notOnWhatsapp": { "textContains": "isn't on WhatsApp" }
+    },
+    {
+      "op": "clear_input",
+      "goal": "Remove any leftover draft from the message input",
+      "target": { "resourceId": "com.whatsapp:id/entry" },
+      "emptyText": "Message"
+    },
+    {
+      "op": "type_text",
+      "goal": "Type the message into the message input",
+      "target": { "resourceId": "com.whatsapp:id/entry" }
+    },
+    {
+      "op": "check_recipient",
+      "header": { "resourceId": "com.whatsapp:id/conversation_contact_name" },
+      "activity": "Conversation"
+    },
+    {
+      "op": "send",
+      "goal": "Find the Send button next to the typed message",
+      "target": { "resourceId": "com.whatsapp:id/send" }
+    },
+    {
+      "op": "confirm_sent",
+      "activity": "Conversation",
+      "textBubble": { "resourceId": "com.whatsapp:id/message_text" },
+      "status": { "resourceId": "com.whatsapp:id/status" },
+      "input": { "resourceId": "com.whatsapp:id/entry" },
+      "emptyText": "Message",
+      "okStatus": ["Sent", "Delivered", "Read"],
+      "timeoutMs": 30000
+    }
+  ]
+}

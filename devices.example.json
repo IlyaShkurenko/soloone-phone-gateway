@@ -1,0 +1,4 @@
+[
+  { "phone": "447700900001", "driver": "multilogin", "profileId": "<multilogin mobile profile id>" },
+  { "phone": "447700900002", "driver": "physical", "adbAddress": "100.64.0.12:5555" }
+]

@@ -1,0 +1,22 @@
+# Phone gateway
+
+Decision: workspace RFC-006. The backend side is `soloone-backend/docs/features/phone-gateway-transport.md` (WA-PGW-*).
+
+## Contracts
+
+- PGW-1: `POST /v1/messages` requires the bearer `GATEWAY_TOKEN`. The body has `messageId`, `from` (sender WhatsApp number), `to` (recipient phone) and either `text` with optional `typingTimeMs`, or `media` with `type`, `url`, `fileName`, `mimeType`, `caption`, `viewOnce`, `voice`.
+- PGW-2: The response is `200 {outcome: "sent"}`, `422 {outcome: "failed", retryable, error}` when Send was not pressed, `502 {outcome: "unknown", error}` when Send was pressed but the sent bubble was not confirmed, or `409 {outcome: "in_progress"}` while the same message ID is running.
+- PGW-3: Each message ID is recorded on disk before Send is pressed. A repeated request returns the recorded `sent` or `unknown` outcome and never presses Send again. Only `failed` attempts, and attempts interrupted before Send, may run again.
+- PGW-4: The device is chosen by `from` from the device registry. A device driver only returns a working ADB serial. The `multilogin` driver starts a stopped phone and enables ADB through the Multilogin REST API, or through a logged-in `xcli` on the same host when no automation token is set. The `physical` driver connects to a fixed ADB address. Operations on one device run one at a time.
+- PGW-5: Operations are declarative step scripts in `scripts/`. Guarded steps are code primitives: `open_chat`, `share_media`, `clear_input`, `type_text`, `type_caption`, `ensure_view_once`, `check_recipient`, `send`, `confirm_sent`, `find_message`, `open_reactions`, `choose_reaction` and `confirm_reaction`. Free steps are `tap`, `dismiss_if_present`, `wait` and `back`.
+- PGW-6: When a step does not find its element before Send, the recovery model gets the compact UI tree, a screenshot and the step goal, and returns one action: tap a listed clickable node, back, wait or abort. The gateway refuses taps on send, voice-note, call, camera, chat-list rows and destructive or share-confirm buttons. Recovery never runs after Send was pressed.
+- PGW-7: After a run that needed recovery or failed on a missing element, the fixer model proposes a full script. A proposal is stored only when it keeps every guarded step in the same order and uses known step types. A proposal never becomes active by itself. A person can dry-run it (it stops before Send and clears the draft) and approve or reject it through the API.
+- PGW-8: Text is typed in small pieces over the requested typing time. Non-ASCII text needs ADB Keyboard; without it the request fails before typing. The input is cleared first and the typed text is checked before Send. The previous keyboard is restored afterwards.
+- PGW-9: View Once is turned on or off to match the request and checked before Send. A media send needs exactly one selected recipient. Text is sent only in the chat opened for `to`.
+- PGW-10: Voice notes, audio files and documents are rejected as not retryable without touching the phone. Photos and videos are supported.
+- PGW-12: `POST /v1/reactions` takes `reactionId`, `from`, `to`, `emoji` (empty to remove `previousEmoji`) and a `target` with `text` or `mediaType` plus `sentAt`. The phone finds the newest matching bubble, preferring the one whose time label matches `sentAt` in the phone's time zone, and scrolls up a few screens when needed. Several matches without a time match fail without reacting. The emoji is looked up in the reaction tray, then the full picker, then the picker search by a keyword from the script. The tap is recorded like Send, and the reaction chip under the bubble is checked afterwards.
+- PGW-11: After each operation WhatsApp is sent to the background so new incoming messages are not marked as read by an open chat. Media copied to the phone is deleted afterwards.
+
+## Validation
+
+`npm run build` type-checks the service. `npm test` covers the UI tree parser, selector matching, recovery tap restrictions and script proposal validation. Device behavior has no hermetic coverage. It is checked on a test number by sending text, a photo and a View Once photo, and by changing a selector to force recovery and a fixer proposal.
