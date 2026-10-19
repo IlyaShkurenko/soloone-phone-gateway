@@ -11,6 +11,7 @@ interface ApiResponse<T> {
 
 const STOPPED = 2
 const STARTED = 0
+const STARTING = 1
 const EXPIRED = 3
 const idleTimers = new Map<string, NodeJS.Timeout>()
 
@@ -70,7 +71,15 @@ async function ensureStarted(profileId: string): Promise<void> {
   if (status === EXPIRED) throw new SendFailure('Cloud phone subscription has expired', false)
   if (status === STOPPED) {
     log.info({ profileId }, 'Starting stopped cloud phone')
-    await startPhone(profileId)
+    try {
+      await startPhone(profileId)
+    } catch (error) {
+      // Multilogin can answer start with HTTP 500 while the phone does start; trust the status.
+      await sleep(3000)
+      status = await phoneStatus(profileId)
+      if (status !== STARTED && status !== STARTING) throw error
+      log.warn({ err: error, profileId, status }, 'Start reported an error, but the phone is starting')
+    }
   }
   for (let waited = 0; status !== STARTED; waited += 3000) {
     if (waited > 90_000) throw new SendFailure('Cloud phone did not start in time', true)
