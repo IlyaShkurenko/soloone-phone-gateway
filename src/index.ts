@@ -254,4 +254,4 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (!res.headersSent) res.status(500).json({ outcome: 'unknown', error: 'Phone gateway internal error' })
 })
 
-app.listen(config.port, () => log.info({ port: config.port }, 'Phone gateway started'))
+app.listen(config.port, config.host, () => log.info({ host: config.host, port: config.port }, 'Phone gateway started'))

@@ -13,6 +13,8 @@ const root = process.cwd()
 
 export const config = {
   port: parseInt(process.env.PORT || '4010', 10),
+  // Only the backend on the same host should reach the gateway.
+  host: process.env.HOST || '127.0.0.1',
   token: requireEnv('GATEWAY_TOKEN'),
   devicesFile: path.resolve(root, process.env.DEVICES_FILE || 'devices.json'),
   scriptsDir: path.resolve(root, process.env.SCRIPTS_DIR || 'scripts'),
