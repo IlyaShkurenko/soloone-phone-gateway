@@ -18,7 +18,11 @@ async function api<T>(path: string, body: unknown): Promise<T> {
   if (!config.multilogin.token) throw new SendFailure('Multilogin token is not configured', false)
   const response = await fetch(`${config.multilogin.apiUrl}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${config.multilogin.token}` },
+    // Cloudflare in front of the API rejects some default client signatures.
+    headers: {
+      'Content-Type': 'application/json', Accept: 'application/json',
+      'User-Agent': 'soloone-phone-gateway/1.0', Authorization: `Bearer ${config.multilogin.token}`
+    },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(20_000)
   })
