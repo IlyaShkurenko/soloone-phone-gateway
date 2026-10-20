@@ -297,6 +297,12 @@ export async function runScript(serial: string, script: Script, request: RunRequ
             for (let attempt = 0; attempt < 3; attempt++) await shell(serial, 'input keyevent KEYCODE_BACK')
             throw new SendFailure(`Reaction ${emoji} is not available on the phone`, false)
           }
+          if (options.dryRun) {
+            // The tray and the emoji were found; close them without reacting.
+            entry.note = 'dry run stopped before choosing the reaction'
+            for (let attempt = 0; attempt < 3; attempt++) await shell(serial, 'input keyevent KEYCODE_BACK')
+            return { outcome: 'stopped_before_send', trace }
+          }
           await options.onSendPressed()
           sendPressed = true
           await tap(serial, option)

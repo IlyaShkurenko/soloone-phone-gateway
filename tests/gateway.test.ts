@@ -27,6 +27,12 @@ test('UI tree parser decodes entities and bounds', () => {
 })
 
 // Contract: PGW-5
+test('WhatsApp Business resource ids match the regular WhatsApp selectors', () => {
+  const nodes = parseUiTree(`<node text="" resource-id="com.whatsapp.w4b:id/send" class="android.widget.ImageButton" content-desc="Send" clickable="true" bounds="[1,1][2,2]" />`)
+  assert.equal(find(nodes, { resourceId: 'com.whatsapp:id/send' })?.desc, 'Send')
+})
+
+// Contract: PGW-5
 test('selectors require every given field and never match an empty selector', () => {
   const nodes = parseUiTree(xml)
   assert.equal(find(nodes, { resourceId: 'com.whatsapp:id/view_once_toggle', desc: 'Turn off view once' })?.index, 5)

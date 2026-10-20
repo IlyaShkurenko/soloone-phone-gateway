@@ -40,7 +40,8 @@ export function parseUiTree(xml: string): UiNode[] {
     const b = attrs.bounds?.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/)
     nodes.push({
       index: nodes.length,
-      resourceId: attrs['resource-id'] || '',
+      // WhatsApp Business names the same views com.whatsapp.w4b:id/...; scripts use com.whatsapp:id/.
+      resourceId: (attrs['resource-id'] || '').replace(/^com\.whatsapp\.w4b:id\//, 'com.whatsapp:id/'),
       text: attrs.text || '',
       desc: attrs['content-desc'] || '',
       className: attrs.class || '',

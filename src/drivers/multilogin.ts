@@ -81,11 +81,14 @@ async function ensureStarted(profileId: string): Promise<void> {
       log.warn({ err: error, profileId, status }, 'Start reported an error, but the phone is starting')
     }
   }
-  for (let waited = 0; status !== STARTED; waited += 3000) {
+  let waited = 0
+  for (; status !== STARTED; waited += 3000) {
     if (waited > 90_000) throw new SendFailure('Cloud phone did not start in time', true)
     await sleep(3000)
     status = await phoneStatus(profileId)
   }
+  // Right after a start the ADB service inside the phone needs a moment before it accepts logins.
+  if (waited > 0) await sleep(12_000)
 }
 
 interface AdbInfo { id: string; status: string; ip?: string; port?: string; pwd?: string }
@@ -151,8 +154,8 @@ export async function connectMultilogin(profileId: string): Promise<string> {
     if (!/^[A-Za-z0-9]+$/.test(info.pwd)) throw new SendFailure('Cloud phone ADB password has unexpected characters', true)
     // Right after ADB is enabled the phone may not accept logins for a few seconds.
     let login = ''
-    for (let attempt = 0; attempt < 6 && !/success|already logged/i.test(login); attempt++) {
-      if (attempt > 0) await sleep(3000)
+    for (let attempt = 0; attempt < 12 && !/success|already logged/i.test(login); attempt++) {
+      if (attempt > 0) await sleep(4000)
       login = await adb(['-s', serial, 'shell', 'glogin', info.pwd]).catch(error => String(error))
     }
     if (!/success|already logged/i.test(login)) throw new SendFailure('Cloud phone ADB login failed', true)

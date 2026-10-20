@@ -25,6 +25,17 @@ npm run dev
 
 Moving a number to another phone means editing this file. The backend does not change.
 
+## Daily screen check
+
+A dedicated test phone runs every flow without sending, so a WhatsApp update that moves a button is noticed before customers are affected:
+
+```bash
+npm run selftest -- --from 447832694090 --to 447832610633 --react-text "selftest anchor"
+pm2 start npm --name soloone-phone-selftest --cron "0 6 * * *" --no-autorestart -- run selftest -- --from 447832694090 --to 447832610633
+```
+
+The report is in `state/selftest/latest.json`; a failed check names the script step that broke.
+
 ## Scripts and fixes
 
 `scripts/send_text.json` and `scripts/send_media.json` are the active scripts. When a run needs LLM recovery or cannot find an element, the fixer stores a proposal under `state/proposals/`. Proposals are never applied automatically:
