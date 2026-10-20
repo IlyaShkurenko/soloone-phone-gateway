@@ -6,7 +6,7 @@ import { createServer } from 'node:http'
 import path from 'node:path'
 import { config } from './config.js'
 import { findDevice, whatsappPackage } from './devices.js'
-import { connect, release } from './drivers/index.js'
+import { connect, release, stop } from './drivers/index.js'
 import { RunError, runScript, type RunRequest, type TraceEntry } from './executor.js'
 import { log } from './logger.js'
 import { loadScript } from './scripts.js'
@@ -89,6 +89,14 @@ await check('video view once', 'send_media', { to, media: { type: 'video', url: 
 await check('reaction tray', 'react', { to, reaction: { emoji: '👍', text: reactText } }, () => !!reactText)
 
 server.close()
+// The test phone is only needed for this run; stop it so plan minutes are not spent.
+try {
+  const serial = await connect(device)
+  await stop(device, serial)
+  console.log('test phone stopped')
+} catch (error) {
+  console.log('could not stop the test phone:', error instanceof Error ? error.message : error)
+}
 await rm(photo, { force: true })
 await rm(video, { force: true })
 const report = { at: new Date().toISOString(), from, to, ok: checks.every(item => item.ok), checks }

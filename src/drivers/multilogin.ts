@@ -164,6 +164,16 @@ export async function connectMultilogin(profileId: string): Promise<string> {
   return serial
 }
 
+// Stops the phone so plan minutes stop counting; used after a self-test.
+export async function stopMultilogin(profileId: string, serial: string): Promise<void> {
+  clearTimeout(idleTimers.get(profileId))
+  idleTimers.delete(profileId)
+  await adb(['disconnect', serial]).catch(() => undefined)
+  await setAdb(profileId, false).catch(error => log.warn({ err: error, profileId }, 'Could not disable ADB before stop'))
+  if (useXcli()) await xcli(['mobile-profiles-phone-stop', '--ids', profileId])
+  else await api('/mobile_profiles/phone/stop', { ids: [profileId] })
+}
+
 export function releaseMultilogin(profileId: string, serial: string): void {
   scheduleIdleDisable(profileId, serial)
 }
