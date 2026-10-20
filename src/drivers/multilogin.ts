@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { config } from '../config.js'
-import { adb, quote, shell, sleep } from '../adb.js'
+import { adb, shell, sleep } from '../adb.js'
 import { SendFailure } from '../errors.js'
 import { log } from '../logger.js'
 
@@ -146,11 +146,14 @@ export async function connectMultilogin(profileId: string): Promise<string> {
   if (!await isAlive(serial)) {
     await adb(['disconnect', serial]).catch(() => undefined)
     await adb(['connect', serial])
-    // Right after ADB is enabled the phone rejects the correct password for a few seconds.
+    // AICODE-NOTE: glogin is not a real shell command: the phone takes everything after "glogin"
+    // as the password, so quotes or a "2>&1" make a correct password fail with "password error".
+    if (!/^[A-Za-z0-9]+$/.test(info.pwd)) throw new SendFailure('Cloud phone ADB password has unexpected characters', true)
+    // Right after ADB is enabled the phone may not accept logins for a few seconds.
     let login = ''
     for (let attempt = 0; attempt < 6 && !/success|already logged/i.test(login); attempt++) {
       if (attempt > 0) await sleep(3000)
-      login = await shell(serial, `glogin ${quote(info.pwd)} 2>&1`).catch(error => String(error))
+      login = await adb(['-s', serial, 'shell', 'glogin', info.pwd]).catch(error => String(error))
     }
     if (!/success|already logged/i.test(login)) throw new SendFailure('Cloud phone ADB login failed', true)
     if (!await isAlive(serial)) throw new SendFailure('Cloud phone ADB is not responding', true)
