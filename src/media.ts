@@ -37,12 +37,20 @@ async function toMp4(input: string, output: string): Promise<void> {
   throw new SendFailure('This video format cannot be sent from the phone', false)
 }
 
+// AICODE-NOTE: Large PNG photos (5.5 MB screenshots) stayed "Pending" and then "Retry" in WhatsApp on
+// the cloud phone, while JPEG photos and 14 MB videos uploaded fine. WhatsApp sends photos as JPEG
+// anyway, so convert everything that is not JPEG first.
+async function toJpeg(input: string, output: string): Promise<void> {
+  if (await ffmpeg(['-i', input, '-frames:v', '1', '-q:v', '3', '-pix_fmt', 'yuvj420p', output])) return
+  throw new SendFailure('This photo format cannot be sent from the phone', false)
+}
+
 // The file name is derived from the backend message ID, so it is safe inside device shell quotes.
 export async function stageMedia(serial: string, messageId: string, media: {
   type: 'image' | 'video'; url: string; fileName: string; mimeType?: string
 }): Promise<StagedMedia> {
   const sourceMime = mimeFor(media.type, media.mimeType, media.fileName)
-  const mimeType = media.type === 'video' ? 'video/mp4' : sourceMime
+  const mimeType = media.type === 'video' ? 'video/mp4' : 'image/jpeg'
   const base = `soloone-${messageId.replace(/[^\w-]/g, '')}`
   const name = `${base}.${EXTENSIONS[mimeType]}`
   const localDir = path.join(config.stateDir, 'tmp')
@@ -68,7 +76,7 @@ export async function stageMedia(serial: string, messageId: string, media: {
     await shell(serial, `rm -f ${quote(remotePath)}; am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d ${quote(`file://${remotePath}`)} >/dev/null`).catch(() => undefined)
   }
   try {
-    if (sourceMime !== mimeType) await toMp4(sourcePath, localPath)
+    if (sourceMime !== mimeType) await (media.type === 'video' ? toMp4 : toJpeg)(sourcePath, localPath)
     await adb(['-s', serial, 'push', localPath, remotePath], 120_000)
     await shell(serial, `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d ${quote(`file://${remotePath}`)} >/dev/null`)
     for (let attempt = 0; attempt < 10; attempt++) {
