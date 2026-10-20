@@ -21,5 +21,7 @@ jobs:
             source ~/.nvm/nvm.sh
             nvm use 22.13.1
             cd /opt/soloone-phone-gateway
-            node dist/selftest.js --from "${{ vars.SELFTEST_FROM }}" --to "${{ vars.SELFTEST_TO }}" --react-text "${{ vars.SELFTEST_REACT_TEXT }}" 2>&1 | grep -vE '^\{"level":30'
-            test "${PIPESTATUS[0]}" = "0"
+            node dist/selftest.js --from "${{ vars.SELFTEST_FROM }}" --to "${{ vars.SELFTEST_TO }}" --react-text "${{ vars.SELFTEST_REACT_TEXT }}" > /tmp/selftest.log 2>&1
+            rc=$?
+            grep -vE '^\{"level":30' /tmp/selftest.log
+            exit $rc
