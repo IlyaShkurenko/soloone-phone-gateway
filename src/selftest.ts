@@ -45,6 +45,7 @@ const server = createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': file === photo ? 'image/png' : 'video/quicktime' })
   res.end(await readFile(file))
 }).listen(0, '127.0.0.1')
+await new Promise<void>(resolve => server.once('listening', () => resolve()))
 const port = (server.address() as { port: number }).port
 const url = (name: string) => `http://127.0.0.1:${port}/${name}`
 
