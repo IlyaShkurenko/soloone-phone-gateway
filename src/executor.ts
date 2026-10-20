@@ -106,10 +106,10 @@ export async function runScript(serial: string, script: Script, request: RunRequ
     return node
   }
 
-  async function waitFor(selector: Selector, timeoutMs: number, stopOn?: Selector): Promise<UiNode[]> {
+  async function waitFor(selector: Selector, timeoutMs: number, stopOn?: Selector, stopOn2?: Selector): Promise<UiNode[]> {
     const until = Date.now() + timeoutMs
     let nodes = await read(true)
-    while (Date.now() < until && !find(nodes, selector) && !(stopOn && find(nodes, stopOn))) {
+    while (Date.now() < until && !find(nodes, selector) && !(stopOn && find(nodes, stopOn)) && !(stopOn2 && find(nodes, stopOn2))) {
       await sleep(800)
       nodes = await read(true)
     }
@@ -134,10 +134,22 @@ export async function runScript(serial: string, script: Script, request: RunRequ
       switch (step.op) {
         case 'open_chat': {
           if (request.media) throw new SendFailure('Text script used for media', false)
-          await run(`am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${request.to}`)} -p ${quote(request.pkg)} >/dev/null`)
           const notOnWhatsapp = step.notOnWhatsapp as Selector | undefined
-          const nodes = await waitFor(step.target!, 12_000, notOnWhatsapp)
-          if (notOnWhatsapp && find(nodes, notOnWhatsapp)) throw new SendFailure('Recipient is not on WhatsApp', false)
+          const retryDialog = step.retryDialog as Selector | undefined
+          let nodes: UiNode[] = []
+          for (let attempt = 0; attempt < 3; attempt++) {
+            await run(`am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${request.to}`)} -p ${quote(request.pkg)} >/dev/null`)
+            nodes = await waitFor(step.target!, 12_000, notOnWhatsapp, retryDialog)
+            if (notOnWhatsapp && find(nodes, notOnWhatsapp)) throw new SendFailure('Recipient is not on WhatsApp', false)
+            // AICODE-NOTE: WhatsApp Business sometimes answers the number lookup behind the deep link with
+            // "Couldn't connect. Please try again later." although the phone is online; a retry usually works.
+            const stuck = retryDialog && find(nodes, retryDialog)
+            if (!stuck) break
+            const ok = find(nodes, selectorParam(step, 'retryConfirm'))
+            if (ok) await tapNode(ok)
+            entry.note = `lookup retried (${attempt + 1})`
+            await sleep(2500)
+          }
           await locate(index, step, step.target!, entry)
           chatHeader = find(await read(), selectorParam(step, 'header'))?.text || ''
           if (!chatHeader) throw new SendFailure('Chat header is not readable', false)

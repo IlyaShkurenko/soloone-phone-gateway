@@ -7,7 +7,9 @@
       "goal": "Open the WhatsApp chat with the recipient and show the message input",
       "target": { "resourceId": "com.whatsapp:id/entry" },
       "header": { "resourceId": "com.whatsapp:id/conversation_contact_name" },
-      "notOnWhatsapp": { "textContains": "isn't on WhatsApp" }
+      "notOnWhatsapp": { "textContains": "isn't on WhatsApp" },
+      "retryDialog": { "resourceId": "android:id/message", "textContains": "Couldn't connect" },
+      "retryConfirm": { "resourceId": "android:id/button1" }
     },
     {
       "op": "clear_input",
