@@ -353,8 +353,11 @@ async function confirmSent(serial: string, step: Step, request: RunRequest, dead
         // Keep waiting while it uploads and press Retry once; the staged file is still on the phone.
         const newestStatus = findAll(nodes, status).sort((a, b) => b.bounds[3] - a.bounds[3])[0]
         if (newestStatus?.desc === pendingStatus) until = deadline
-        const retry = retrySelector && find(nodes, retrySelector)
-        if (retry?.clickable && !retried) {
+        // Only the newest row is ours; an older stuck Retry bubble must never be tapped.
+        const retry = retrySelector && findAll(nodes, retrySelector).sort((a, b) => b.bounds[3] - a.bounds[3])[0]
+        const retryIsNewest = !!retry && !!newestStatus
+          && retry.bounds[1] >= newestStatus.bounds[1] - 160 && retry.bounds[1] <= newestStatus.bounds[3] + 20
+        if (retry?.clickable && retryIsNewest && !retried) {
           retried = true
           until = deadline
           await tap(serial, retry)
