@@ -5,7 +5,9 @@
     {
       "op": "share_media",
       "goal": "Open the WhatsApp media composer for the shared photo or video",
-      "target": { "resourceId": "com.whatsapp:id/caption" }
+      "target": { "resourceId": "com.whatsapp:id/caption" },
+      "shareDialog": { "resourceId": "android:id/message", "textContains": "Share with" },
+      "shareConfirm": { "resourceId": "android:id/button1" }
     },
     {
       "op": "ensure_view_once",

@@ -136,7 +136,19 @@ export async function runScript(serial: string, script: Script, request: RunRequ
             `--es jid ${quote(`${request.to}@s.whatsapp.net`)}`,
             `--grant-read-uri-permission -p ${quote(request.pkg)} >/dev/null`
           ].join(' '))
-          await waitFor(step.target!, 15_000)
+          const shareDialog = step.shareDialog as Selector | undefined
+          let nodes = await waitFor(step.target!, 15_000, shareDialog)
+          if (shareDialog && find(nodes, shareDialog)) {
+            // AICODE-NOTE: For a video sent to one chat WhatsApp first asks "Share with <name>?";
+            // OK then opens the media composer (checked 2026-10-20). For photos OK may send at once,
+            // so only videos pass this dialog, and only through this code path, never recovery.
+            if (request.media.type !== 'video') throw new SendFailure('WhatsApp offered a plain file share for this photo', false)
+            const confirm = find(nodes, selectorParam(step, 'shareConfirm'))
+            if (!confirm) throw new SendFailure('Share dialog has no confirm button', false)
+            await tap(serial, confirm)
+            await sleep(1500)
+            nodes = await waitFor(step.target!, 20_000)
+          }
           await locate(index, step, step.target!, entry)
           entry.note = 'media composer opened'
           break
