@@ -7,7 +7,7 @@ on:
 
 jobs:
   selftest:
-    if: vars.DEPLOY_ENABLED == 'true'
+    if: vars.SELFTEST_FROM != ''
     runs-on: ubuntu-latest
     steps:
       - name: Run the dry-run screen check on the test phone
