@@ -31,10 +31,10 @@ Every push to `main` runs `npm run build` and `npm test` in GitHub Actions; a gr
 
 ## Daily screen check
 
-A dedicated test phone runs every flow without sending, so a WhatsApp update that moves a button is noticed before customers are affected:
+A dedicated test phone (port37, WhatsApp Business, profile 636765815298851079) runs every flow without sending against port38, so a WhatsApp update that moves a button is noticed before customers are affected. The same scripts serve WhatsApp and WhatsApp Business:
 
 ```bash
-npm run selftest -- --from 447832694090 --to 447832610633 --react-text "selftest anchor"
+npm run selftest -- --from 447832694090 --to 447832610633 --react-text "selftest anchor"   # the anchor is one real message in that chat
 pm2 start npm --name soloone-phone-selftest --cron "0 6 * * *" --no-autorestart -- run selftest -- --from 447832694090 --to 447832610633
 ```
 
