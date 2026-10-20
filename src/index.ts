@@ -7,6 +7,7 @@ import { connect, release } from './drivers/index.js'
 import { SendFailure, SendUncertain } from './errors.js'
 import { RunError, runScript, type RunRequest } from './executor.js'
 import { proposeFix } from './fixer.js'
+import { prepareMedia } from './media.js'
 import * as ledger from './ledger.js'
 import { log } from './logger.js'
 import { approveProposal, getProposal, listProposals, loadScript, rejectProposal, type Script } from './scripts.js'
@@ -91,10 +92,13 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
     if (!device) throw new SendFailure(`No phone is registered for ${from}`, false)
     script = await loadScript(request.media ? 'send_media' : 'send_text')
     const activeScript = script
+    // Download and convert while the phone is being started or connected.
+    const media = request.media ? { ...request.media, prepared: prepareMedia(request.messageId, request.media) } : undefined
+    media?.prepared?.catch(() => undefined)
     const result = await runOnDevice(device.phone, async () => {
       const serial = await connect(device)
       try {
-        return await runScript(serial, activeScript, { ...request, pkg: whatsappPackage(device) }, {
+        return await runScript(serial, activeScript, { ...request, media, pkg: whatsappPackage(device) }, {
           startedAt,
           onSendPressed: () => ledger.markSendPressed(request.messageId)
         })

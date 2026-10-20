@@ -46,9 +46,17 @@ async function toJpeg(input: string, output: string): Promise<void> {
 }
 
 // The file name is derived from the backend message ID, so it is safe inside device shell quotes.
-export async function stageMedia(serial: string, messageId: string, media: {
+export interface PreparedMedia {
+  name: string
+  localPath: string
+  sourcePath: string
+  mimeType: string
+}
+
+// Download and convert on the server. Independent of the phone, so it can overlap with connecting (PGW-15).
+export async function prepareMedia(messageId: string, media: {
   type: 'image' | 'video'; url: string; fileName: string; mimeType?: string
-}): Promise<StagedMedia> {
+}): Promise<PreparedMedia> {
   const sourceMime = mimeFor(media.type, media.mimeType, media.fileName)
   const mimeType = media.type === 'video' ? 'video/mp4' : 'image/jpeg'
   const base = `soloone-${messageId.replace(/[^\w-]/g, '')}`
@@ -56,7 +64,6 @@ export async function stageMedia(serial: string, messageId: string, media: {
   const localDir = path.join(config.stateDir, 'tmp')
   const sourcePath = path.join(localDir, `${base}.source.${EXTENSIONS[sourceMime]}`)
   const localPath = path.join(localDir, name)
-  const remotePath = `/sdcard/Download/${name}`
 
   let response: Response
   try {
@@ -70,13 +77,29 @@ export async function stageMedia(serial: string, messageId: string, media: {
 
   await mkdir(localDir, { recursive: true })
   await writeFile(sourceMime === mimeType ? localPath : sourcePath, bytes)
-  const cleanup = async () => {
+  try {
+    if (sourceMime !== mimeType) await (media.type === 'video' ? toMp4 : toJpeg)(sourcePath, localPath)
+  } catch (error) {
     await rm(localPath, { force: true })
     await rm(sourcePath, { force: true })
+    throw error
+  }
+  return { name, localPath, sourcePath, mimeType }
+}
+
+export async function discardPrepared(prepared: PreparedMedia): Promise<void> {
+  await rm(prepared.localPath, { force: true })
+  await rm(prepared.sourcePath, { force: true })
+}
+
+export async function stageMedia(serial: string, prepared: PreparedMedia): Promise<StagedMedia> {
+  const { name, localPath, mimeType } = prepared
+  const remotePath = `/sdcard/Download/${name}`
+  const cleanup = async () => {
+    await discardPrepared(prepared)
     await shell(serial, `rm -f ${quote(remotePath)}; am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d ${quote(`file://${remotePath}`)} >/dev/null`).catch(() => undefined)
   }
   try {
-    if (sourceMime !== mimeType) await (media.type === 'video' ? toMp4 : toJpeg)(sourcePath, localPath)
     await adb(['-s', serial, 'push', localPath, remotePath], 120_000)
     await shell(serial, `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d ${quote(`file://${remotePath}`)} >/dev/null`)
     for (let attempt = 0; attempt < 10; attempt++) {

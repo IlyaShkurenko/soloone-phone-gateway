@@ -1,7 +1,7 @@
 import { quote, screenshot, shell, sleep, topActivity } from './adb.js'
 import { config } from './config.js'
 import { SendFailure, SendUncertain } from './errors.js'
-import { stageMedia, type StagedMedia } from './media.js'
+import { discardPrepared, prepareMedia, stageMedia, type PreparedMedia, type StagedMedia } from './media.js'
 import { recoverOnce, type RecoveryAction } from './recovery.js'
 import type { Script, Step } from './scripts.js'
 import { clearFocusedInput, typeText } from './typing.js'
@@ -13,7 +13,11 @@ export interface RunRequest {
   pkg: string
   text?: string
   typingTimeMs?: number
-  media?: { type: 'image' | 'video'; url: string; fileName: string; mimeType?: string; caption?: string; viewOnce: boolean }
+  media?: {
+    type: 'image' | 'video'; url: string; fileName: string; mimeType?: string; caption?: string; viewOnce: boolean
+    // Started before the phone connection so download and conversion overlap with it.
+    prepared?: Promise<PreparedMedia>
+  }
   // An empty emoji removes `previousEmoji`, the way tapping your own reaction again does.
   reaction?: { emoji: string; previousEmoji?: string; text?: string; mediaType?: 'image' | 'video'; sentAt?: string }
 }
@@ -67,9 +71,22 @@ export async function runScript(serial: string, script: Script, request: RunRequ
   let bubble: UiNode | undefined
   let reacted = false
 
+  // A UI snapshot stays valid for a few seconds while nothing is done on the phone (PGW-15).
+  // Any action below clears it; checks after typing and after Send always read fresh.
+  let cached: { nodes: UiNode[]; at: number } | null = null
+  const read = async (fresh = false): Promise<UiNode[]> => {
+    if (!fresh && cached && Date.now() - cached.at < config.uiSnapshotCacheMs) return cached.nodes
+    const nodes = await dumpUi(serial)
+    cached = { nodes, at: Date.now() }
+    return nodes
+  }
+  const act = async <T>(promise: Promise<T>): Promise<T> => { const result = await promise; cached = null; return result }
+  const tapNode = (node: UiNode) => act(tap(serial, node))
+  const run = (command: string) => act(shell(serial, command))
+
   // Contract: PGW-6 — find an element, letting the recovery model act only before Send.
   async function locate(stepIndex: number, step: Step, selector: Selector, entry: TraceEntry): Promise<UiNode> {
-    let nodes = await dumpUi(serial)
+    let nodes = await read()
     let node = find(nodes, selector)
     for (let attempt = 0; !node && !sendPressed && attempt < MAX_RECOVERY_PER_STEP && recoveriesLeft > 0; attempt++) {
       if (!evidence) evidence = { step: stepIndex, tree: describeTree(nodes), screenshot: await screenshot(serial).catch(() => undefined) }
@@ -78,7 +95,8 @@ export async function runScript(serial: string, script: Script, request: RunRequ
       if (!action) break
       ;(entry.recovery ||= []).push(action)
       if (action.action === 'abort') break
-      nodes = await dumpUi(serial)
+      cached = null
+      nodes = await read(true)
       node = find(nodes, selector)
     }
     if (!node) {
@@ -90,10 +108,10 @@ export async function runScript(serial: string, script: Script, request: RunRequ
 
   async function waitFor(selector: Selector, timeoutMs: number, stopOn?: Selector): Promise<UiNode[]> {
     const until = Date.now() + timeoutMs
-    let nodes = await dumpUi(serial)
+    let nodes = await read(true)
     while (Date.now() < until && !find(nodes, selector) && !(stopOn && find(nodes, stopOn))) {
       await sleep(800)
-      nodes = await dumpUi(serial)
+      nodes = await read(true)
     }
     return nodes
   }
@@ -105,7 +123,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
   }
 
   try {
-    await shell(serial, 'input keyevent KEYCODE_WAKEUP')
+    await run('input keyevent KEYCODE_WAKEUP')
     for (const [index, step] of script.steps.entries()) {
       const entry: TraceEntry = { step: index, op: step.op, note: '' }
       trace.push(entry)
@@ -116,20 +134,21 @@ export async function runScript(serial: string, script: Script, request: RunRequ
       switch (step.op) {
         case 'open_chat': {
           if (request.media) throw new SendFailure('Text script used for media', false)
-          await shell(serial, `am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${request.to}`)} -p ${quote(request.pkg)} >/dev/null`)
+          await run(`am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${request.to}`)} -p ${quote(request.pkg)} >/dev/null`)
           const notOnWhatsapp = step.notOnWhatsapp as Selector | undefined
           const nodes = await waitFor(step.target!, 12_000, notOnWhatsapp)
           if (notOnWhatsapp && find(nodes, notOnWhatsapp)) throw new SendFailure('Recipient is not on WhatsApp', false)
           await locate(index, step, step.target!, entry)
-          chatHeader = find(await dumpUi(serial), selectorParam(step, 'header'))?.text || ''
+          chatHeader = find(await read(), selectorParam(step, 'header'))?.text || ''
           if (!chatHeader) throw new SendFailure('Chat header is not readable', false)
           entry.note = 'chat opened'
           break
         }
         case 'share_media': {
           if (!request.media) throw new SendFailure('Media script used for text', false)
-          staged = await stageMedia(serial, request.messageId, request.media)
-          await shell(serial, [
+          const prepared = await (request.media.prepared ?? prepareMedia(request.messageId, request.media))
+          staged = await stageMedia(serial, prepared)
+          await run([
             'am start -a android.intent.action.SEND',
             `-t ${quote(staged.mimeType)}`,
             `--eu android.intent.extra.STREAM ${quote(staged.contentUri)}`,
@@ -145,7 +164,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
             if (request.media.type !== 'video') throw new SendFailure('WhatsApp offered a plain file share for this photo', false)
             const confirm = find(nodes, selectorParam(step, 'shareConfirm'))
             if (!confirm) throw new SendFailure('Share dialog has no confirm button', false)
-            await tap(serial, confirm)
+            await tapNode(confirm)
             await sleep(1500)
             nodes = await waitFor(step.target!, 20_000)
           }
@@ -154,15 +173,15 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           break
         }
         case 'tap': {
-          await tap(serial, await locate(index, step, step.target!, entry))
+          await tapNode(await locate(index, step, step.target!, entry))
           await sleep(600)
           entry.note = 'tapped'
           break
         }
         case 'dismiss_if_present': {
-          const node = find(await dumpUi(serial), step.target!)
+          const node = find(await read(), step.target!)
           if (node) {
-            await tap(serial, node)
+            await tapNode(node)
             await sleep(600)
           }
           entry.note = node ? 'dismissed' : 'not present'
@@ -173,7 +192,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           break
         }
         case 'back': {
-          await shell(serial, 'input keyevent KEYCODE_BACK')
+          await run('input keyevent KEYCODE_BACK')
           await sleep(600)
           break
         }
@@ -181,9 +200,9 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           const emptyText = typeof step.emptyText === 'string' ? step.emptyText : ''
           const node = await locate(index, step, step.target!, entry)
           if (node.text && node.text !== emptyText) {
-            await tap(serial, node)
-            await clearFocusedInput(serial, Array.from(node.text).length)
-            const after = find(await dumpUi(serial), step.target!)
+            await tapNode(node)
+            await act(clearFocusedInput(serial, Array.from(node.text).length))
+            const after = find(await read(true), step.target!)
             if (after?.text && after.text !== emptyText) throw new SendFailure('Could not clear the message input', true)
             entry.note = 'cleared a leftover draft'
           }
@@ -191,11 +210,11 @@ export async function runScript(serial: string, script: Script, request: RunRequ
         }
         case 'type_text': {
           if (!request.text) throw new SendFailure('Text is empty', false)
-          await tap(serial, await locate(index, step, step.target!, entry))
-          await typeText(serial, request.text, request.typingTimeMs || 2000)
-          const typed = find(await dumpUi(serial), step.target!)
+          await tapNode(await locate(index, step, step.target!, entry))
+          await act(typeText(serial, request.text, request.typingTimeMs || 2000))
+          const typed = find(await read(true), step.target!)
           if (normalize(typed?.text || '') !== normalize(request.text)) {
-            if (typed?.text) await clearFocusedInput(serial, Array.from(typed.text).length)
+            if (typed?.text) await act(clearFocusedInput(serial, Array.from(typed.text).length))
             throw new SendFailure('Typed text does not match the message', true)
           }
           entry.note = 'typed and checked'
@@ -207,9 +226,9 @@ export async function runScript(serial: string, script: Script, request: RunRequ
             entry.note = 'no caption'
             break
           }
-          await tap(serial, await locate(index, step, step.target!, entry))
-          await typeText(serial, caption, Math.min(8000, Array.from(caption).length * 80))
-          const typed = findAll(await dumpUi(serial), step.target!).map(node => normalize(node.text))
+          await tapNode(await locate(index, step, step.target!, entry))
+          await act(typeText(serial, caption, Math.min(8000, Array.from(caption).length * 80)))
+          const typed = findAll(await read(true), step.target!).map(node => normalize(node.text))
           if (!typed.includes(normalize(caption))) throw new SendFailure('Typed caption does not match', true)
           entry.note = 'caption typed and checked'
           break
@@ -218,7 +237,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           // Contract: PGW-9 — the toggle must end in the requested state before Send.
           const want = request.media?.viewOnce === true
           const onDesc = String(step.onDesc)
-          let nodes = await dumpUi(serial)
+          let nodes = await read()
           let toggle = find(nodes, step.target!)
           if (!toggle && !want) {
             entry.note = 'no toggle, View Once off'
@@ -226,16 +245,16 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           }
           toggle ||= await locate(index, step, step.target!, entry)
           if ((toggle.desc === onDesc) !== want) {
-            await tap(serial, toggle)
+            await tapNode(toggle)
             await sleep(900)
             const nux = step.nux as Selector | undefined
-            nodes = await dumpUi(serial)
+            nodes = await read(true)
             const sheet = nux && find(nodes, nux)
             if (sheet) {
-              await tap(serial, sheet)
+              await tapNode(sheet)
               await sleep(700)
             }
-            nodes = await dumpUi(serial)
+            nodes = await read(true)
             toggle = find(nodes, step.target!)
           }
           if (!toggle || (toggle.desc === onDesc) !== want) throw new SendFailure('View Once state could not be confirmed', false)
@@ -244,7 +263,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
         }
         case 'check_recipient': {
           // Contract: PGW-9 — only the chat opened for `to`, or exactly one share recipient.
-          const nodes = await dumpUi(serial)
+          const nodes = await read()
           if (request.media) {
             const recipients = find(nodes, selectorParam(step, 'recipients'))
             if (!recipients) throw new SendFailure('Share recipient count is not visible', false)
@@ -266,7 +285,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           const button = await locate(index, step, step.target!, entry)
           await options.onSendPressed()
           sendPressed = true
-          await tap(serial, button)
+          await tapNode(button)
           entry.note = 'Send pressed'
           break
         }
@@ -279,10 +298,10 @@ export async function runScript(serial: string, script: Script, request: RunRequ
         }
         case 'open_reactions': {
           if (!bubble) throw new SendFailure('No message selected for the reaction', false)
-          await longPress(serial, bubble)
+          await act(longPress(serial, bubble))
           await sleep(1200)
-          if (!find(await dumpUi(serial, true), selectorParam(step, 'tray'))) {
-            await shell(serial, 'input keyevent KEYCODE_BACK')
+          if (!find(await act(dumpUi(serial, true)), selectorParam(step, 'tray'))) {
+            await run('input keyevent KEYCODE_BACK')
             throw new SendFailure('Reaction tray did not open', true)
           }
           entry.note = 'reaction tray open'
@@ -294,18 +313,18 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           if (!emoji) throw new SendFailure('No reaction to set or remove', false)
           const option = await findReactionOption(serial, step, emoji)
           if (!option) {
-            for (let attempt = 0; attempt < 3; attempt++) await shell(serial, 'input keyevent KEYCODE_BACK')
+            for (let attempt = 0; attempt < 3; attempt++) await run('input keyevent KEYCODE_BACK')
             throw new SendFailure(`Reaction ${emoji} is not available on the phone`, false)
           }
           if (options.dryRun) {
             // The tray and the emoji were found; close them without reacting.
             entry.note = 'dry run stopped before choosing the reaction'
-            for (let attempt = 0; attempt < 3; attempt++) await shell(serial, 'input keyevent KEYCODE_BACK')
+            for (let attempt = 0; attempt < 3; attempt++) await run('input keyevent KEYCODE_BACK')
             return { outcome: 'stopped_before_send', trace }
           }
           await options.onSendPressed()
           sendPressed = true
-          await tap(serial, option)
+          await tapNode(option)
           await sleep(1200)
           entry.note = request.reaction?.emoji ? 'reaction chosen' : 'reaction removed'
           break
@@ -336,9 +355,10 @@ export async function runScript(serial: string, script: Script, request: RunRequ
     // An error after Send can never be reported as a safe failure.
     throw new RunError(sendPressed && cause instanceof SendFailure ? new SendUncertain(cause.message) : cause, trace, evidence)
   } finally {
+    if (!staged && request.media?.prepared) await request.media.prepared.then(discardPrepared).catch(() => undefined)
     await staged?.cleanup()
     // Contract: PGW-11 — an open chat would mark new incoming messages as read.
-    await shell(serial, 'input keyevent KEYCODE_HOME').catch(() => undefined)
+    await run('input keyevent KEYCODE_HOME').catch(() => undefined)
   }
 }
 
