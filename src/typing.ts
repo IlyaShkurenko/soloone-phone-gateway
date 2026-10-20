@@ -31,13 +31,14 @@ export async function clearFocusedInput(serial: string, length: number): Promise
   }
 }
 
-// Contract: PGW-8 — type in small pieces spread over the typing time, then restore the keyboard.
-export async function typeText(serial: string, text: string, typingTimeMs: number): Promise<void> {
+// Contract: PGW-8 — without a typing time the text goes in as one piece: the phone round trips already
+// take real time. With one, it is spread over that time in small pieces. The keyboard is restored after.
+export async function typeText(serial: string, text: string, typingTimeMs = 0): Promise<void> {
   if (!text) return
   // Each adb round trip already costs time, so very long texts get fewer, larger pieces.
-  const pieces = Math.min(Array.from(text).length, Math.max(1, Math.floor(typingTimeMs / 350)))
+  const pieces = typingTimeMs > 0 ? Math.min(Array.from(text).length, Math.max(1, Math.floor(typingTimeMs / 350))) : 1
   const parts = splitIntoPieces(text, pieces)
-  const pause = () => sleep(Math.max(0, typingTimeMs / parts.length - 200) * (0.6 + Math.random() * 0.8))
+  const pause = () => typingTimeMs > 0 ? sleep(Math.max(0, typingTimeMs / parts.length - 200) * (0.6 + Math.random() * 0.8)) : Promise.resolve()
 
   if (await hasAdbKeyboard(serial)) {
     const previous = (await shell(serial, 'settings get secure default_input_method')).trim()

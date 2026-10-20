@@ -83,7 +83,7 @@ async function check(name: string, scriptName: string, request: Omit<RunRequest,
 }
 
 const reactText = arg('react-text')
-await check('text', 'send_text', { to, text: 'Selftest text, no send', typingTimeMs: 1500 })
+await check('text', 'send_text', { to, text: 'Selftest text, no send' })
 await check('photo view once with caption', 'send_media', { to, media: { type: 'image', url: url('photo.png'), fileName: 'photo.png', mimeType: 'image/png', viewOnce: true, caption: 'selftest' } })
 await check('video view once', 'send_media', { to, media: { type: 'video', url: url('video.mov'), fileName: 'video.mov', mimeType: 'video/quicktime', viewOnce: true } })
 await check('reaction tray', 'react', { to, reaction: { emoji: '👍', text: reactText } }, () => !!reactText)

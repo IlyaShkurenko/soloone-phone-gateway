@@ -211,7 +211,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
         case 'type_text': {
           if (!request.text) throw new SendFailure('Text is empty', false)
           await tapNode(await locate(index, step, step.target!, entry))
-          await act(typeText(serial, request.text, request.typingTimeMs || 2000))
+          await act(typeText(serial, request.text, request.typingTimeMs ?? 0))
           const typed = find(await read(true), step.target!)
           if (normalize(typed?.text || '') !== normalize(request.text)) {
             if (typed?.text) await act(clearFocusedInput(serial, Array.from(typed.text).length))
@@ -227,7 +227,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
             break
           }
           await tapNode(await locate(index, step, step.target!, entry))
-          await act(typeText(serial, caption, Math.min(8000, Array.from(caption).length * 80)))
+          await act(typeText(serial, caption))
           const typed = findAll(await read(true), step.target!).map(node => normalize(node.text))
           if (!typed.includes(normalize(caption))) throw new SendFailure('Typed caption does not match', true)
           entry.note = 'caption typed and checked'
@@ -498,7 +498,7 @@ async function findReactionOption(serial: string, step: Step, emoji: string): Pr
   if (!keyword || !search) return undefined
   await tap(serial, search)
   await sleep(900)
-  await typeText(serial, keyword, 600)
+  await typeText(serial, keyword)
   await sleep(1500)
   return findAll(await dumpUi(serial, true), step.pickerEmoji as Selector).find(node => sameEmoji(node.desc, emoji))
 }
