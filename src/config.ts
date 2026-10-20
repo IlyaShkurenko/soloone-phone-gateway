@@ -20,6 +20,7 @@ export const config = {
   scriptsDir: path.resolve(root, process.env.SCRIPTS_DIR || 'scripts'),
   stateDir: path.resolve(root, process.env.STATE_DIR || 'state'),
   adbPath: process.env.ADB_PATH || 'adb',
+  ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
   multilogin: {
     apiUrl: (process.env.MULTILOGIN_API_URL || 'https://api.multilogin.com').replace(/\/$/, ''),
     token: process.env.MULTILOGIN_TOKEN?.trim() || '',
