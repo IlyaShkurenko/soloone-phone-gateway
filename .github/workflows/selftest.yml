@@ -1,0 +1,25 @@
+name: phone-selftest
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run the dry-run screen check on the test phone
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script_stop: true
+          script: |
+            source ~/.nvm/nvm.sh
+            nvm use 22.13.1
+            cd /opt/soloone-phone-gateway
+            node dist/selftest.js --from "${{ vars.SELFTEST_FROM }}" --to "${{ vars.SELFTEST_TO }}" --react-text "${{ vars.SELFTEST_REACT_TEXT }}" 2>&1 | grep -vE '^\{"level":30'
+            test "${PIPESTATUS[0]}" = "0"

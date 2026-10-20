@@ -1,0 +1,45 @@
+name: ci-and-deploy
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script: |
+            set -e
+            source ~/.nvm/nvm.sh
+            nvm use 22.13.1
+            cd /opt/soloone-phone-gateway
+            git pull
+            npm ci
+            npm run build
+            # Do not restart while a message is being sent on a phone.
+            n=0
+            while grep -l '"state":"running"' state/ledger/*.json >/dev/null 2>&1 && [ $n -lt 40 ]; do n=$((n+1)); sleep 5; done
+            pm2 restart soloone-phone-gateway --update-env
+            pm2 save
