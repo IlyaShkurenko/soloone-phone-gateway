@@ -15,6 +15,7 @@ Decision: workspace RFC-006. The backend side is `soloone-backend/docs/features/
 - PGW-9: View Once is turned on or off to match the request and checked before Send. A media send needs exactly one selected recipient. Text is sent only in the chat opened for `to`.
 - PGW-10: Voice notes, audio files and documents are rejected as not retryable without touching the phone. Photos and videos are supported.
 - PGW-12: `POST /v1/reactions` takes `reactionId`, `from`, `to`, `emoji` (empty to remove `previousEmoji`) and a `target` with `text` or `mediaType` plus `sentAt`. The phone finds the newest matching bubble, preferring the one whose time label matches `sentAt` in the phone's time zone, and scrolls up a few screens when needed. Several matches without a time match fail without reacting. The emoji is looked up in the reaction tray, then the full picker, then the picker search by a keyword from the script. The tap is recorded like Send, and the reaction chip under the bubble is checked afterwards.
+- PGW-13: After Send, a media bubble in `Pending` state extends the confirmation wait to the request deadline, and a `Retry` bubble is tapped once before the wait continues. A still unconfirmed upload is reported as `unknown`, never `failed`, because WhatsApp may still send it.
 - PGW-11: After each operation WhatsApp is sent to the background so new incoming messages are not marked as read by an open chat. Media copied to the phone is deleted afterwards.
 
 ## Validation

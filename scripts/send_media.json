@@ -36,7 +36,9 @@
       "mediaBubble": { "descPattern": "^(View once photo|View once video|Enlarge photo|Play video)" },
       "status": { "resourceId": "com.whatsapp:id/status" },
       "okStatus": ["Sent", "Delivered", "Read"],
-      "timeoutMs": 60000
+      "pendingStatus": "Pending",
+      "retry": { "desc": "Retry" },
+      "timeoutMs": 90000
     }
   ]
 }

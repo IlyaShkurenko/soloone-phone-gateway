@@ -340,11 +340,28 @@ async function confirmSent(serial: string, step: Step, request: RunRequest, dead
   const okStatus = Array.isArray(step.okStatus) ? step.okStatus.map(String) : ['Sent', 'Delivered', 'Read']
   const status = step.status as Selector
   // Never wait past the request deadline; the backend would time out first.
-  const until = Math.min(deadline, Date.now() + (typeof step.timeoutMs === 'number' ? step.timeoutMs : 30_000))
+  let until = Math.min(deadline, Date.now() + (typeof step.timeoutMs === 'number' ? step.timeoutMs : 30_000))
+  const retrySelector = step.retry as Selector | undefined
+  const pendingStatus = typeof step.pendingStatus === 'string' ? step.pendingStatus : 'Pending'
+  let retried = false
   while (Date.now() < until) {
     const nodes = await dumpUi(serial)
     const activity = await topActivity(serial)
     if (activity.includes(String(step.activity || 'Conversation'))) {
+      if (request.media) {
+        // A media upload can stall on the cloud phone: WhatsApp shows "Pending", then a "Retry" bubble.
+        // Keep waiting while it uploads and press Retry once; the staged file is still on the phone.
+        const newestStatus = findAll(nodes, status).sort((a, b) => b.bounds[3] - a.bounds[3])[0]
+        if (newestStatus?.desc === pendingStatus) until = deadline
+        const retry = retrySelector && find(nodes, retrySelector)
+        if (retry?.clickable && !retried) {
+          retried = true
+          until = deadline
+          await tap(serial, retry)
+          await sleep(2000)
+          continue
+        }
+      }
       const bubbleSelector = (request.media ? step.mediaBubble : step.textBubble) as Selector
       let bubbles = findAll(nodes, bubbleSelector)
       if (!request.media) bubbles = bubbles.filter(node => normalize(node.text) === normalize(request.text || ''))
