@@ -16,12 +16,5 @@ jobs:
           host: ${{ secrets.HETZNER_HOST }}
           username: ${{ secrets.HETZNER_USER }}
           key: ${{ secrets.HETZNER_SSH_KEY }}
-          script_stop: true
           script: |
-            source ~/.nvm/nvm.sh
-            nvm use 22.13.1
-            cd /opt/soloone-phone-gateway
-            node dist/selftest.js --from "${{ vars.SELFTEST_FROM }}" --to "${{ vars.SELFTEST_TO }}" --react-text "${{ vars.SELFTEST_REACT_TEXT }}" > /tmp/selftest.log 2>&1
-            rc=$?
-            grep -vE '^\{"level":30' /tmp/selftest.log
-            exit $rc
+            bash /opt/soloone-phone-gateway/ci/selftest.sh "${{ vars.SELFTEST_FROM }}" "${{ vars.SELFTEST_TO }}" "${{ vars.SELFTEST_REACT_TEXT }}"
