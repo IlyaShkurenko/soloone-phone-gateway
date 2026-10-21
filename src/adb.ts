@@ -22,8 +22,25 @@ function run(args: string[], timeoutMs: number, binary = false): Promise<Buffer 
   })
 }
 
+const DROPPED = /device offline|device '[^']*' not found|connection reset|closed|protocol fault/i
+
+// Contract: PGW-17 — a dropped TCP ADB link (VPN hiccup) is reconnected once and the command retried.
+async function withReconnect<T>(args: string[], attempt: () => Promise<T>): Promise<T> {
+  try {
+    return await attempt()
+  } catch (error) {
+    const serialIndex = args.indexOf('-s')
+    const serial = serialIndex >= 0 ? args[serialIndex + 1] : undefined
+    if (!serial || !serial.includes(':') || !DROPPED.test(error instanceof Error ? error.message : String(error))) throw error
+    await run(['disconnect', serial], 10_000).catch(() => undefined)
+    await run(['connect', serial], 15_000)
+    await sleep(1500)
+    return attempt()
+  }
+}
+
 export async function adb(args: string[], timeoutMs = 20_000): Promise<string> {
-  return run(args, timeoutMs) as Promise<string>
+  return withReconnect(args, () => run(args, timeoutMs) as Promise<string>)
 }
 
 // The command runs in the device shell, so callers quote untrusted parts with quote().
@@ -32,7 +49,8 @@ export async function shell(serial: string, command: string, timeoutMs = 20_000)
 }
 
 export async function screenshot(serial: string): Promise<Buffer> {
-  return run(['-s', serial, 'exec-out', 'screencap', '-p'], 20_000, true) as Promise<Buffer>
+  const args = ['-s', serial, 'exec-out', 'screencap', '-p']
+  return withReconnect(args, () => run(args, 20_000, true) as Promise<Buffer>)
 }
 
 export async function topActivity(serial: string): Promise<string> {
