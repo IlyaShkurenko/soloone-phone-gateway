@@ -35,6 +35,12 @@ export const config = {
     fixerModel: process.env.GATEWAY_FIXER_MODEL?.trim() || '',
     screenshots: process.env.LLM_SCREENSHOTS !== 'false'
   },
+  // Offline alerts for physical phones (PGW-18); without both values alerts are only logged.
+  alerts: {
+    email: process.env.ALERT_EMAIL?.trim() || '',
+    resendApiKey: process.env.RESEND_API_KEY?.trim() || '',
+    from: process.env.ALERT_FROM?.trim() || 'SoloOne <support@solo1.ai>'
+  },
   // A UI snapshot is reused this long when nothing was done on the phone; 0 disables the cache.
   uiSnapshotCacheMs: parseInt(process.env.UI_SNAPSHOT_CACHE_MS || '5000', 10),
   // Must stay below the backend's 150s request timeout (WA-PGW-4).

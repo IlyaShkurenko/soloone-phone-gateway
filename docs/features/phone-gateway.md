@@ -20,6 +20,7 @@ Decision: workspace RFC-006. The backend side is `soloone-backend/docs/features/
 - PGW-15: A UI snapshot is reused for up to `UI_SNAPSHOT_CACHE_MS` (default 5 s) while nothing was done on the phone; every tap, key, intent and typing clears it, and the checks after typing, before confirming and after Send always read fresh. Media download and conversion start before the phone connection and overlap with it.
 - PGW-16: `open_chat` retries the deep link up to three times when WhatsApp answers the number lookup with its "Couldn't connect" dialog, pressing its OK in between.
 - PGW-17: When an ADB command fails because the TCP link dropped (`device offline`, `not found`, connection reset), the gateway reconnects to that serial once and retries the command. A second failure is reported as usual.
+- PGW-18: Every 5 minutes the gateway checks each physical phone over ADB. After two misses in a row it e-mails `ALERT_EMAIL` once (subject "Phone +<number> is offline", with a ready message for the phone holder), and e-mails again when the phone answers. Cloud phones are not checked: they are stopped until needed.
 - PGW-11: After each operation WhatsApp is sent to the background so new incoming messages are not marked as read by an open chat. Media copied to the phone is deleted afterwards.
 
 ## Validation

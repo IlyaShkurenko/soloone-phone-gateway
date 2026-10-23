@@ -8,6 +8,7 @@ import { SendFailure, SendUncertain } from './errors.js'
 import { RunError, runScript, type RunRequest } from './executor.js'
 import { proposeFix } from './fixer.js'
 import { prepareMedia } from './media.js'
+import { startWatchdog } from './watchdog.js'
 import * as ledger from './ledger.js'
 import { log } from './logger.js'
 import { approveProposal, getProposal, listProposals, loadScript, rejectProposal, type Script } from './scripts.js'
@@ -259,3 +260,4 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 })
 
 app.listen(config.port, config.host, () => log.info({ host: config.host, port: config.port }, 'Phone gateway started'))
+startWatchdog()
