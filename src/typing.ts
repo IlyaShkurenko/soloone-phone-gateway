@@ -24,10 +24,14 @@ async function hasAdbKeyboard(serial: string): Promise<boolean> {
   return (await shell(serial, 'pm list packages com.android.adbkeyboard')).includes('com.android.adbkeyboard')
 }
 
+// AICODE-NOTE: in a wrapped (multi-line) input MOVE_END only reaches the end of the tapped line, so the
+// text after the cursor is removed with forward deletes too. Otherwise a two-line draft survives.
 export async function clearFocusedInput(serial: string, length: number): Promise<void> {
   await shell(serial, 'input keyevent KEYCODE_MOVE_END')
-  for (let left = length + 5; left > 0; left -= 40) {
-    await shell(serial, `input keyevent ${Array(Math.min(40, left)).fill('KEYCODE_DEL').join(' ')}`)
+  for (const key of ['KEYCODE_DEL', 'KEYCODE_FORWARD_DEL']) {
+    for (let left = length + 5; left > 0; left -= 40) {
+      await shell(serial, `input keyevent ${Array(Math.min(40, left)).fill(key).join(' ')}`)
+    }
   }
 }
 
