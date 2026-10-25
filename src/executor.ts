@@ -32,6 +32,8 @@ export interface TraceEntry {
   step: number
   op: string
   note: string
+  // Milliseconds since the run started, when this step began.
+  atMs?: number
   recovery?: RecoveryAction[]
 }
 
@@ -47,11 +49,19 @@ export interface RunEvidence {
   screenshot?: Buffer
 }
 
+// The screen at the moment a run failed, for the failure report (PGW-20).
+export interface FailureScreen {
+  activity?: string
+  tree?: string
+  screenshot?: Buffer
+}
+
 export class RunError extends Error {
   constructor(
     public readonly failure: SendFailure | SendUncertain,
     public readonly trace: TraceEntry[],
-    public readonly evidence?: RunEvidence
+    public readonly evidence?: RunEvidence,
+    public readonly screen?: FailureScreen
   ) {
     super(failure.message)
   }
@@ -63,6 +73,7 @@ const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
 
 export async function runScript(serial: string, script: Script, request: RunRequest, options: RunOptions): Promise<RunResult> {
   const trace: TraceEntry[] = []
+  const runStartedAt = Date.now()
   let evidence: RunEvidence | undefined
   let recoveriesLeft = MAX_RECOVERY_PER_RUN
   let sendPressed = false
@@ -134,7 +145,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
   try {
     await run('input keyevent KEYCODE_WAKEUP')
     for (const [index, step] of script.steps.entries()) {
-      const entry: TraceEntry = { step: index, op: step.op, note: '' }
+      const entry: TraceEntry = { step: index, op: step.op, note: '', atMs: Date.now() - runStartedAt }
       trace.push(entry)
       if (Date.now() - options.startedAt > config.requestDeadlineMs) {
         throw sendPressed ? new SendUncertain('Ran out of time while confirming') : new SendFailure('Ran out of time before sending', true)
@@ -235,6 +246,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           await act(typeText(serial, request.text, request.typingTimeMs ?? 0))
           const typed = find(await read(true), step.target!)
           if (normalize(typed?.text || '') !== normalize(request.text)) {
+            entry.note = `typed back ${JSON.stringify(typed?.text ?? null)}`
             if (typed?.text) await act(clearFocusedInput(serial, Array.from(typed.text).length))
             throw new SendFailure('Typed text does not match the message', true)
           }
@@ -373,8 +385,14 @@ export async function runScript(serial: string, script: Script, request: RunRequ
       : sendPressed
         ? new SendUncertain(error instanceof Error ? error.message : 'Confirmation failed')
         : new SendFailure(error instanceof Error ? error.message : 'Phone operation failed', true)
+    // Captured before the finally block leaves the chat; a dead ADB link only loses the picture.
+    const screen: FailureScreen = options.dryRun ? {} : {
+      activity: await topActivity(serial).catch(() => undefined),
+      tree: await dumpUi(serial).then(describeTree).catch(() => undefined),
+      screenshot: await screenshot(serial).catch(() => undefined)
+    }
     // An error after Send can never be reported as a safe failure.
-    throw new RunError(sendPressed && cause instanceof SendFailure ? new SendUncertain(cause.message) : cause, trace, evidence)
+    throw new RunError(sendPressed && cause instanceof SendFailure ? new SendUncertain(cause.message) : cause, trace, evidence, screen)
   } finally {
     if (!staged && request.media?.prepared) await request.media.prepared.then(discardPrepared).catch(() => undefined)
     await staged?.cleanup()

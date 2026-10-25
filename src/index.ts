@@ -6,6 +6,7 @@ import { findDevice, whatsappPackage } from './devices.js'
 import { connect, release } from './drivers/index.js'
 import { SendFailure, SendUncertain } from './errors.js'
 import { RunError, runScript, type RunRequest } from './executor.js'
+import { saveFailure } from './failures.js'
 import { proposeFix } from './fixer.js'
 import { prepareMedia } from './media.js'
 import { startWatchdog } from './watchdog.js'
@@ -121,6 +122,13 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
       failed(res, known.message, known.retryable)
     }
     log.warn({ err: failure, messageId: request.messageId }, 'Phone send did not complete')
+    void saveFailure({
+      messageId: request.messageId, outcome: failure instanceof SendUncertain ? 'unknown' : 'failed',
+      error: failure instanceof Error ? failure.message : String(failure),
+      retryable: failure instanceof SendFailure ? failure.retryable : undefined,
+      request: { from, ...request }, trace: error instanceof RunError ? error.trace : undefined,
+      screen: error instanceof RunError ? error.screen : undefined
+    })
     if (script && error instanceof RunError && needsFix(error.trace, error)) {
       void proposeFix({ script, reason: error.message, trace: error.trace, evidence: error.evidence })
     }
@@ -193,6 +201,13 @@ async function sendReaction(req: Request, res: Response): Promise<void> {
       failed(res, known.message, known.retryable)
     }
     log.warn({ err: failure, reactionId: body.reactionId }, 'Phone reaction did not complete')
+    void saveFailure({
+      messageId: body.reactionId, outcome: failure instanceof SendUncertain ? 'unknown' : 'failed',
+      error: failure instanceof Error ? failure.message : String(failure),
+      retryable: failure instanceof SendFailure ? failure.retryable : undefined,
+      request: body, trace: error instanceof RunError ? error.trace : undefined,
+      screen: error instanceof RunError ? error.screen : undefined
+    })
   }
 }
 

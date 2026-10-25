@@ -22,6 +22,7 @@ Decision: workspace RFC-006. The backend side is `soloone-backend/docs/features/
 - PGW-17: When an ADB command fails because the TCP link dropped (`device offline`, `not found`, connection reset), the gateway reconnects to that serial once and retries the command. A second failure is reported as usual.
 - PGW-18: Every 5 minutes the gateway checks each physical phone over ADB. After two misses in a row it e-mails `ALERT_EMAIL` once (subject "Phone +<number> is offline", with a ready message for the phone holder), and e-mails again when the phone answers. Cloud phones are not checked: they are stopped until needed.
 - PGW-19: When a step's element is missing and a system UI tip window (`com.android.systemui:id/...tip...`) is on screen, the gateway presses Back once and reads the screen again before any recovery model is asked.
+- PGW-20: Every failed or uncertain message or reaction leaves a report in `state/failures/<time>_<messageId>/`: the request, the error, each step with its note and start time (a typed-text mismatch notes what the input read back), and the screen at the moment of failure (activity, UI tree, screenshot). Reports older than 14 days are deleted. Screenshots show the phone's chats, so the folder stays on the server.
 - PGW-11: After each operation WhatsApp is sent to the background so new incoming messages are not marked as read by an open chat. Media copied to the phone is deleted afterwards.
 
 ## Validation
