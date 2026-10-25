@@ -88,6 +88,15 @@ export async function runScript(serial: string, script: Script, request: RunRequ
   async function locate(stepIndex: number, step: Step, selector: Selector, entry: TraceEntry): Promise<UiNode> {
     let nodes = await read()
     let node = find(nodes, selector)
+    // AICODE-NOTE: Samsung system tips (e.g. Circle to Search) sit in their own window above WhatsApp and
+    // hide its whole tree from the UI dump; Back closes them. Handled in code, before any model is asked.
+    if (!node && nodes.some(item => /^com\.android\.systemui:id\/.*tip/i.test(item.resourceId))) {
+      await run('input keyevent KEYCODE_BACK')
+      await sleep(800)
+      nodes = await read(true)
+      node = find(nodes, selector)
+      entry.note = 'closed a system tip'
+    }
     for (let attempt = 0; !node && !sendPressed && attempt < MAX_RECOVERY_PER_STEP && recoveriesLeft > 0; attempt++) {
       if (!evidence) evidence = { step: stepIndex, tree: describeTree(nodes), screenshot: await screenshot(serial).catch(() => undefined) }
       recoveriesLeft--
