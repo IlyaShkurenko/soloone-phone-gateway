@@ -242,15 +242,20 @@ export async function runScript(serial: string, script: Script, request: RunRequ
         }
         case 'type_text': {
           if (!request.text) throw new SendFailure('Text is empty', false)
-          await tapNode(await locate(index, step, step.target!, entry))
-          await act(typeText(serial, request.text, request.typingTimeMs ?? 0))
-          const typed = find(await read(true), step.target!)
-          if (normalize(typed?.text || '') !== normalize(request.text)) {
-            entry.note = `typed back ${JSON.stringify(typed?.text ?? null)}`
+          // AICODE-NOTE: the start of a message has been seen missing after typing (cause not reproduced),
+          // so a mismatch is cleared and typed once more. Still before Send; a leftover fails the check again.
+          const misses: string[] = []
+          for (let attempt = 1; ; attempt++) {
+            await tapNode(await locate(index, step, step.target!, entry))
+            await act(typeText(serial, request.text, request.typingTimeMs ?? 0))
+            const typed = find(await read(true), step.target!)
+            if (normalize(typed?.text || '') === normalize(request.text)) break
+            misses.push(`typed back ${JSON.stringify(typed?.text ?? null)}`)
+            entry.note = misses.join('; ')
             if (typed?.text) await act(clearFocusedInput(serial, Array.from(typed.text).length))
-            throw new SendFailure('Typed text does not match the message', true)
+            if (attempt === 2) throw new SendFailure('Typed text does not match the message', true)
           }
-          entry.note = 'typed and checked'
+          entry.note = misses.length ? `${misses.join('; ')}; retyped and checked` : 'typed and checked'
           break
         }
         case 'type_caption': {
