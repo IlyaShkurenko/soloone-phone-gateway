@@ -211,6 +211,72 @@ async function sendReaction(req: Request, res: Response): Promise<void> {
   }
 }
 
+interface DeletionBody {
+  deletionId?: unknown
+  from?: unknown
+  to?: unknown
+  target?: { text?: unknown; mediaType?: unknown; sentAt?: unknown }
+}
+
+// Contract: PGW-21 — delete one of our own messages for everyone.
+async function sendDeletion(req: Request, res: Response): Promise<void> {
+  const startedAt = Date.now()
+  const body = req.body as DeletionBody
+  if (typeof body.deletionId !== 'string' || !/^[\w-]{8,64}$/.test(body.deletionId)) return void failed(res, 'deletionId is invalid', false)
+  if (typeof body.from !== 'string' || !/^\d{7,15}$/.test(body.from)) return void failed(res, 'from must be a phone number', false)
+  if (typeof body.to !== 'string' || !/^\d{7,15}$/.test(body.to)) return void failed(res, 'to must be a phone number', false)
+  const target = body.target || {}
+  const text = typeof target.text === 'string' && target.text.trim() ? target.text : undefined
+  const mediaType = target.mediaType === 'image' || target.mediaType === 'video' ? target.mediaType : undefined
+  if (!text && !mediaType) return void failed(res, 'Only text, photo and video messages can be deleted', false)
+
+  const deletionId = body.deletionId
+  const admission = await ledger.admit(deletionId)
+  if (admission.kind === 'in_progress') return void res.status(409).json({ outcome: 'in_progress' })
+  if (admission.kind === 'done') {
+    if (admission.state === 'sent') res.json({ outcome: 'sent' })
+    else res.status(502).json({ outcome: 'unknown', error: admission.error || 'Earlier attempt is uncertain' })
+    return
+  }
+
+  try {
+    const device = await findDevice(body.from)
+    if (!device) throw new SendFailure(`No phone is registered for ${body.from}`, false)
+    const script = await loadScript('delete')
+    await runOnDevice(device.phone, async () => {
+      const serial = await connect(device)
+      try {
+        return await runScript(serial, script, {
+          messageId: deletionId, to: body.to as string, pkg: whatsappPackage(device),
+          deletion: { text, mediaType, sentAt: typeof target.sentAt === 'string' ? target.sentAt : undefined }
+        }, { startedAt, onSendPressed: () => ledger.markSendPressed(deletionId) })
+      } finally {
+        release(device, serial)
+      }
+    })
+    await ledger.finish(deletionId, 'sent')
+    res.json({ outcome: 'sent' })
+  } catch (error) {
+    const failure = error instanceof RunError ? error.failure : error
+    if (failure instanceof SendUncertain) {
+      await ledger.finish(deletionId, 'unknown', failure.message)
+      res.status(502).json({ outcome: 'unknown', error: failure.message })
+    } else {
+      const known = failure instanceof SendFailure ? failure : new SendFailure(failure instanceof Error ? failure.message : 'Phone gateway failed', true)
+      await ledger.finish(deletionId, 'failed', known.message)
+      failed(res, known.message, known.retryable)
+    }
+    log.warn({ err: failure, deletionId }, 'Phone deletion did not complete')
+    void saveFailure({
+      messageId: deletionId, outcome: failure instanceof SendUncertain ? 'unknown' : 'failed',
+      error: failure instanceof Error ? failure.message : String(failure),
+      retryable: failure instanceof SendFailure ? failure.retryable : undefined,
+      request: body, trace: error instanceof RunError ? error.trace : undefined,
+      screen: error instanceof RunError ? error.screen : undefined
+    })
+  }
+}
+
 // Contract: PGW-7 — dry-run stops before Send and clears the draft.
 async function dryRun(req: Request, res: Response): Promise<void> {
   const proposal = await getProposal(req.params.id)
@@ -253,6 +319,7 @@ app.get('/health', (_req, res) => { res.json({ ok: true }) })
 app.use('/v1', (req, res, next) => authorized(req) ? next() : res.status(401).json({ error: 'Unauthorized' }))
 app.post('/v1/messages', (req, res, next) => { sendMessage(req, res).catch(next) })
 app.post('/v1/reactions', (req, res, next) => { sendReaction(req, res).catch(next) })
+app.post('/v1/deletions', (req, res, next) => { sendDeletion(req, res).catch(next) })
 app.get('/v1/proposals', (_req, res, next) => { listProposals().then(proposals => res.json({ proposals })).catch(next) })
 app.post('/v1/proposals/:id/dry-run', (req, res, next) => { dryRun(req, res).catch(next) })
 app.post('/v1/proposals/:id/approve', (req, res, next) => {

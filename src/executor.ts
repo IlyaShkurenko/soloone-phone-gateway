@@ -19,8 +19,12 @@ export interface RunRequest {
     prepared?: Promise<PreparedMedia>
   }
   // An empty emoji removes `previousEmoji`, the way tapping your own reaction again does.
-  reaction?: { emoji: string; previousEmoji?: string; text?: string; mediaType?: 'image' | 'video'; sentAt?: string }
+  reaction?: { emoji: string; previousEmoji?: string } & BubbleTarget
+  // One of our own messages to delete for everyone (PGW-21).
+  deletion?: BubbleTarget
 }
+
+export interface BubbleTarget { text?: string; mediaType?: 'image' | 'video'; sentAt?: string }
 
 export interface RunOptions {
   dryRun?: boolean
@@ -81,6 +85,8 @@ export async function runScript(serial: string, script: Script, request: RunRequ
   let staged: StagedMedia | undefined
   let bubble: UiNode | undefined
   let reacted = false
+  let deleted = false
+  let deletedBefore = 0
 
   // A UI snapshot stays valid for a few seconds while nothing is done on the phone (PGW-15).
   // Any action below clears it; checks after typing and after Send always read fresh.
@@ -328,9 +334,10 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           break
         }
         case 'find_message': {
-          if (!request.reaction) throw new SendFailure('Reaction script used without a reaction', false)
-          bubble = await findTargetBubble(serial, step, request.reaction)
-          if (!bubble) throw new SendFailure('The message to react to is not visible in the chat', false)
+          const target = request.reaction || request.deletion
+          if (!target) throw new SendFailure('Script used without a target message', false)
+          bubble = await findTargetBubble(serial, step, target)
+          if (!bubble) throw new SendFailure('The target message is not visible in the chat', false)
           entry.note = 'message found'
           break
         }
@@ -374,6 +381,47 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           entry.note = 'reaction confirmed'
           break
         }
+        case 'delete_for_everyone': {
+          // Contract: PGW-21 — only "Delete for everyone" is ever tapped; the tap is recorded first like Send.
+          if (!bubble || !request.deletion) throw new SendFailure('No message selected for deletion', false)
+          deletedBefore = findAll(await read(true), selectorParam(step, 'deletedBubble')).length
+          await act(longPress(serial, bubble))
+          await sleep(1200)
+          const menu = find(await read(true), selectorParam(step, 'deleteButton'))
+          if (!menu) {
+            await run('input keyevent KEYCODE_BACK')
+            throw new SendFailure('Delete was not offered for this message', true)
+          }
+          await tapNode(menu)
+          await sleep(1000)
+          const dialog = await read(true)
+          const forEveryone = find(dialog, selectorParam(step, 'forEveryone'))
+          if (!forEveryone || options.dryRun) {
+            const cancel = find(dialog, selectorParam(step, 'cancel'))
+            await (cancel ? tapNode(cancel) : run('input keyevent KEYCODE_BACK'))
+            await sleep(700)
+            if (find(await read(true), selectorParam(step, 'selectionBar'))) await run('input keyevent KEYCODE_BACK')
+            if (!forEveryone) throw new SendFailure('"Delete for everyone" is not offered: the message is too old or not ours', false)
+            entry.note = 'dry run stopped before deleting'
+            return { outcome: 'stopped_before_send', trace }
+          }
+          await options.onSendPressed()
+          sendPressed = true
+          await tapNode(forEveryone)
+          entry.note = 'deleted for everyone'
+          break
+        }
+        case 'confirm_deleted': {
+          if (!sendPressed || !request.deletion) throw new SendFailure('Script confirms before deleting', false)
+          const until = Date.now() + 10_000
+          while (!deleted && Date.now() < until) {
+            await sleep(1000)
+            deleted = findAll(await read(true), selectorParam(step, 'deletedBubble')).length > deletedBefore
+          }
+          if (!deleted) throw new SendUncertain('Delete was tapped but the deleted placeholder did not appear')
+          entry.note = 'deletion confirmed'
+          break
+        }
         case 'confirm_sent': {
           if (!sendPressed) throw new SendFailure('Script confirms before Send', false)
           await confirmSent(serial, step, request, options.startedAt + config.requestDeadlineMs)
@@ -382,7 +430,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
         }
       }
     }
-    if (!sendPressed || (request.reaction && !reacted)) throw new SendFailure('Script finished without sending', false)
+    if (!sendPressed || (request.reaction && !reacted) || (request.deletion && !deleted)) throw new SendFailure('Script finished without sending', false)
     return { outcome: 'sent', trace }
   } catch (error) {
     const cause = error instanceof SendFailure || error instanceof SendUncertain
@@ -482,16 +530,19 @@ function phoneTimeLabel(iso: string, timeZone: string): string | undefined {
 // Rows keep the time label and ticks a little below the bubble content.
 const sameRow = (node: UiNode, bubble: UiNode) => node.bounds[1] >= bubble.bounds[1] - 20 && node.bounds[1] <= bubble.bounds[3] + 160
 
-function bubbleCandidates(nodes: UiNode[], step: Step, reaction: NonNullable<RunRequest['reaction']>): UiNode[] {
-  if (reaction.text) {
-    return findAll(nodes, step.textBubble as Selector).filter(node => normalize(node.text) === normalize(reaction.text!))
-  }
-  const kind = reaction.mediaType === 'video' ? /video/i : /photo/i
-  return findAll(nodes, step.mediaBubble as Selector).filter(node => kind.test(node.desc))
+function bubbleCandidates(nodes: UiNode[], step: Step, target: BubbleTarget): UiNode[] {
+  const kind = target.mediaType === 'video' ? /video/i : /photo/i
+  const matching = target.text
+    ? findAll(nodes, step.textBubble as Selector).filter(node => normalize(node.text) === normalize(target.text!))
+    : findAll(nodes, step.mediaBubble as Selector).filter(node => kind.test(node.desc))
+  if (!step.ownStatus) return matching
+  // Our own messages carry a delivery status icon at the bottom of the same bubble.
+  const statuses = findAll(nodes, step.ownStatus as Selector)
+  return matching.filter(node => statuses.some(status => status.bounds[1] >= node.bounds[1] - 20 && status.bounds[1] <= node.bounds[3] + 60))
 }
 
 // Contract: PGW-12 — newest matching bubble, preferring the one sent at the backend's time.
-async function findTargetBubble(serial: string, step: Step, reaction: NonNullable<RunRequest['reaction']>): Promise<UiNode | undefined> {
+async function findTargetBubble(serial: string, step: Step, reaction: BubbleTarget): Promise<UiNode | undefined> {
   const timeZone = (await shell(serial, 'getprop persist.sys.timezone')).trim()
   const label = reaction.sentAt && timeZone ? phoneTimeLabel(reaction.sentAt, timeZone) : undefined
   const maxScrolls = typeof step.maxScrolls === 'number' ? step.maxScrolls : 4
