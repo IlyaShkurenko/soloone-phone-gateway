@@ -76,6 +76,12 @@ export class RunError extends Error {
 const MAX_RECOVERY_PER_STEP = 3
 const MAX_RECOVERY_PER_RUN = 6
 const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
+// AICODE-NOTE: a chat bubble shows WhatsApp formatting (*bold*, _italic_, ~strike~, ```mono```) without its
+// markers, so bubble text is compared with them removed. The typed input still holds them and is compared as is.
+const sameBubbleText = (shown: string, sent: string) => {
+  const plain = (value: string) => normalize(value.replace(/[*_~`]/g, ''))
+  return plain(shown) === plain(sent)
+}
 
 export async function runScript(serial: string, script: Script, request: RunRequest, options: RunOptions): Promise<RunResult> {
   const trace: TraceEntry[] = []
@@ -527,7 +533,7 @@ async function confirmSent(serial: string, step: Step, request: RunRequest, dead
       }
       const bubbleSelector = (request.media ? step.mediaBubble : step.textBubble) as Selector
       let bubbles = findAll(nodes, bubbleSelector)
-      if (!request.media) bubbles = bubbles.filter(node => normalize(node.text) === normalize(request.text || ''))
+      if (!request.media) bubbles = bubbles.filter(node => sameBubbleText(node.text, request.text || ''))
       const bubble = bubbles.sort((a, b) => b.bounds[3] - a.bounds[3])[0]
       const input = step.input as Selector | undefined
       const inputNode = input && find(nodes, input)
@@ -575,7 +581,7 @@ const sameRow = (node: UiNode, bubble: UiNode) => node.bounds[1] >= bubble.bound
 function bubbleCandidates(nodes: UiNode[], step: Step, target: BubbleTarget): UiNode[] {
   const kind = target.mediaType === 'video' ? /video/i : /photo/i
   const matching = target.text
-    ? findAll(nodes, step.textBubble as Selector).filter(node => normalize(node.text) === normalize(target.text!))
+    ? findAll(nodes, step.textBubble as Selector).filter(node => sameBubbleText(node.text, target.text!))
     : findAll(nodes, step.mediaBubble as Selector).filter(node => kind.test(node.desc))
   if (!step.ownStatus) return matching
   // Our own messages carry a delivery status icon at the bottom of the same bubble.
