@@ -22,6 +22,8 @@ export interface RunRequest {
   reaction?: { emoji: string; previousEmoji?: string } & BubbleTarget
   // One of our own messages to delete for everyone (PGW-21).
   deletion?: BubbleTarget
+  // One of our own text messages to change to `text` (PGW-22).
+  edit?: BubbleTarget
 }
 
 export interface BubbleTarget { text?: string; mediaType?: 'image' | 'video'; sentAt?: string }
@@ -87,6 +89,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
   let reacted = false
   let deleted = false
   let deletedBefore = 0
+  let edited = false
 
   // A UI snapshot stays valid for a few seconds while nothing is done on the phone (PGW-15).
   // Any action below clears it; checks after typing and after Send always read fresh.
@@ -323,6 +326,9 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           if (options.dryRun) {
             entry.note = 'dry run stopped before Send'
             await discardDraft(serial, script, request)
+            // An edit dry run also leaves the edit screen, so the chat is back to normal.
+            const exitEdit = step.exitEdit ? find(await read(true), step.exitEdit as Selector) : undefined
+            if (exitEdit) await tapNode(exitEdit)
             return { outcome: 'stopped_before_send', trace }
           }
           if (Date.now() - options.startedAt > config.latestSendStartMs) throw new SendFailure('Too late to start sending safely', true)
@@ -334,7 +340,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           break
         }
         case 'find_message': {
-          const target = request.reaction || request.deletion
+          const target = request.reaction || request.deletion || request.edit
           if (!target) throw new SendFailure('Script used without a target message', false)
           bubble = await findTargetBubble(serial, step, target)
           if (!bubble) throw new SendFailure('The target message is not visible in the chat', false)
@@ -422,6 +428,42 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           entry.note = 'deletion confirmed'
           break
         }
+        case 'open_edit': {
+          // Contract: PGW-22 — WhatsApp offers Edit only for our own text within 15 minutes of sending.
+          if (!bubble || !request.edit) throw new SendFailure('No message selected for editing', false)
+          await act(longPress(serial, bubble))
+          await sleep(1200)
+          const more = findAll(await read(true), selectorParam(step, 'more')).at(-1)
+          if (!more) {
+            await run('input keyevent KEYCODE_BACK')
+            throw new SendFailure('The message menu did not open', true)
+          }
+          await tapNode(more)
+          await sleep(1000)
+          const editItem = find(await act(dumpUi(serial, true)), selectorParam(step, 'editItem'))
+          if (!editItem) {
+            for (let attempt = 0; attempt < 2; attempt++) await run('input keyevent KEYCODE_BACK')
+            throw new SendFailure('"Edit" is not offered: the message is older than 15 minutes or not ours', false)
+          }
+          await tapNode(editItem)
+          await sleep(1200)
+          if (!find(await read(true), selectorParam(step, 'editTitle'))) throw new SendFailure('The edit screen did not open', true)
+          entry.note = 'edit screen open'
+          break
+        }
+        case 'confirm_edited': {
+          if (!sendPressed || !request.edit || !request.text) throw new SendFailure('Script confirms before editing', false)
+          const until = Date.now() + 10_000
+          while (!edited && Date.now() < until) {
+            await sleep(1000)
+            const nodes = await read(true)
+            edited = !find(nodes, selectorParam(step, 'editTitle'))
+              && bubbleCandidates(nodes, step, { text: request.text }).length > 0
+          }
+          if (!edited) throw new SendUncertain('Edit was confirmed but the new text did not appear in the chat')
+          entry.note = 'edit confirmed'
+          break
+        }
         case 'confirm_sent': {
           if (!sendPressed) throw new SendFailure('Script confirms before Send', false)
           await confirmSent(serial, step, request, options.startedAt + config.requestDeadlineMs)
@@ -430,7 +472,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
         }
       }
     }
-    if (!sendPressed || (request.reaction && !reacted) || (request.deletion && !deleted)) throw new SendFailure('Script finished without sending', false)
+    if (!sendPressed || (request.reaction && !reacted) || (request.deletion && !deleted) || (request.edit && !edited)) throw new SendFailure('Script finished without sending', false)
     return { outcome: 'sent', trace }
   } catch (error) {
     const cause = error instanceof SendFailure || error instanceof SendUncertain

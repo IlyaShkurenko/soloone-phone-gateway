@@ -8,7 +8,7 @@ export const GUARDED_OPS = [
   'open_chat', 'share_media', 'clear_input', 'type_text', 'type_caption',
   'ensure_view_once', 'check_recipient', 'send', 'confirm_sent',
   'find_message', 'open_reactions', 'choose_reaction', 'confirm_reaction',
-  'delete_for_everyone', 'confirm_deleted'
+  'delete_for_everyone', 'confirm_deleted', 'open_edit', 'confirm_edited'
 ] as const
 export const FREE_OPS = ['tap', 'dismiss_if_present', 'wait', 'back'] as const
 const KNOWN_OPS = new Set<string>([...GUARDED_OPS, ...FREE_OPS])

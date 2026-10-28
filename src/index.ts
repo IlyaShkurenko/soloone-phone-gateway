@@ -277,6 +277,75 @@ async function sendDeletion(req: Request, res: Response): Promise<void> {
   }
 }
 
+interface EditBody {
+  editId?: unknown
+  from?: unknown
+  to?: unknown
+  text?: unknown
+  typingTimeMs?: unknown
+  target?: { text?: unknown; sentAt?: unknown }
+}
+
+// Contract: PGW-22 — change the text of one of our own recent messages.
+async function sendEdit(req: Request, res: Response): Promise<void> {
+  const startedAt = Date.now()
+  const body = req.body as EditBody
+  if (typeof body.editId !== 'string' || !/^[\w-]{8,64}$/.test(body.editId)) return void failed(res, 'editId is invalid', false)
+  if (typeof body.from !== 'string' || !/^\d{7,15}$/.test(body.from)) return void failed(res, 'from must be a phone number', false)
+  if (typeof body.to !== 'string' || !/^\d{7,15}$/.test(body.to)) return void failed(res, 'to must be a phone number', false)
+  if (typeof body.text !== 'string' || !body.text.trim()) return void failed(res, 'text is required', false)
+  const target = body.target || {}
+  if (typeof target.text !== 'string' || !target.text.trim()) return void failed(res, 'Only text messages can be edited', false)
+  if (target.text.replace(/\s+/g, ' ').trim() === body.text.replace(/\s+/g, ' ').trim()) return void failed(res, 'The new text is the same as the old one', false)
+
+  const editId = body.editId
+  const admission = await ledger.admit(editId)
+  if (admission.kind === 'in_progress') return void res.status(409).json({ outcome: 'in_progress' })
+  if (admission.kind === 'done') {
+    if (admission.state === 'sent') res.json({ outcome: 'sent' })
+    else res.status(502).json({ outcome: 'unknown', error: admission.error || 'Earlier attempt is uncertain' })
+    return
+  }
+
+  try {
+    const device = await findDevice(body.from)
+    if (!device) throw new SendFailure(`No phone is registered for ${body.from}`, false)
+    const script = await loadScript('edit')
+    await runOnDevice(device.phone, async () => {
+      const serial = await connect(device)
+      try {
+        return await runScript(serial, script, {
+          messageId: editId, to: body.to as string, pkg: whatsappPackage(device), text: body.text as string,
+          typingTimeMs: typeof body.typingTimeMs === 'number' ? Math.max(500, Math.min(30_000, body.typingTimeMs)) : undefined,
+          edit: { text: target.text as string, sentAt: typeof target.sentAt === 'string' ? target.sentAt : undefined }
+        }, { startedAt, onSendPressed: () => ledger.markSendPressed(editId) })
+      } finally {
+        release(device, serial)
+      }
+    })
+    await ledger.finish(editId, 'sent')
+    res.json({ outcome: 'sent' })
+  } catch (error) {
+    const failure = error instanceof RunError ? error.failure : error
+    if (failure instanceof SendUncertain) {
+      await ledger.finish(editId, 'unknown', failure.message)
+      res.status(502).json({ outcome: 'unknown', error: failure.message })
+    } else {
+      const known = failure instanceof SendFailure ? failure : new SendFailure(failure instanceof Error ? failure.message : 'Phone gateway failed', true)
+      await ledger.finish(editId, 'failed', known.message)
+      failed(res, known.message, known.retryable)
+    }
+    log.warn({ err: failure, editId }, 'Phone edit did not complete')
+    void saveFailure({
+      messageId: editId, outcome: failure instanceof SendUncertain ? 'unknown' : 'failed',
+      error: failure instanceof Error ? failure.message : String(failure),
+      retryable: failure instanceof SendFailure ? failure.retryable : undefined,
+      request: body, trace: error instanceof RunError ? error.trace : undefined,
+      screen: error instanceof RunError ? error.screen : undefined
+    })
+  }
+}
+
 // Contract: PGW-7 — dry-run stops before Send and clears the draft.
 async function dryRun(req: Request, res: Response): Promise<void> {
   const proposal = await getProposal(req.params.id)
@@ -320,6 +389,7 @@ app.use('/v1', (req, res, next) => authorized(req) ? next() : res.status(401).js
 app.post('/v1/messages', (req, res, next) => { sendMessage(req, res).catch(next) })
 app.post('/v1/reactions', (req, res, next) => { sendReaction(req, res).catch(next) })
 app.post('/v1/deletions', (req, res, next) => { sendDeletion(req, res).catch(next) })
+app.post('/v1/edits', (req, res, next) => { sendEdit(req, res).catch(next) })
 app.get('/v1/proposals', (_req, res, next) => { listProposals().then(proposals => res.json({ proposals })).catch(next) })
 app.post('/v1/proposals/:id/dry-run', (req, res, next) => { dryRun(req, res).catch(next) })
 app.post('/v1/proposals/:id/approve', (req, res, next) => {

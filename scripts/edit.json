@@ -1,0 +1,57 @@
+{
+  "name": "edit",
+  "version": 1,
+  "steps": [
+    {
+      "op": "open_chat",
+      "goal": "Open the WhatsApp chat with the recipient and show the message input",
+      "target": { "resourceId": "com.whatsapp:id/entry" },
+      "header": { "resourceId": "com.whatsapp:id/conversation_contact_name" },
+      "notOnWhatsapp": { "textContains": "isn't on WhatsApp" },
+      "retryDialog": { "resourceId": "android:id/message", "textContains": "Couldn't connect" },
+      "retryConfirm": { "resourceId": "android:id/button1" }
+    },
+    {
+      "op": "find_message",
+      "goal": "Find our own text message to edit",
+      "textBubble": { "resourceId": "com.whatsapp:id/message_text" },
+      "date": { "resourceId": "com.whatsapp:id/date" },
+      "ownStatus": { "resourceId": "com.whatsapp:id/status" },
+      "maxScrolls": 4
+    },
+    {
+      "op": "check_recipient",
+      "header": { "resourceId": "com.whatsapp:id/conversation_contact_name" },
+      "activity": "Conversation"
+    },
+    {
+      "op": "open_edit",
+      "more": { "resourceId": "com.whatsapp:id/menuitem_overflow" },
+      "editItem": { "text": "Edit" },
+      "editTitle": { "text": "Edit message" }
+    },
+    {
+      "op": "clear_input",
+      "goal": "Remove the old text from the edit input",
+      "target": { "resourceId": "com.whatsapp:id/entry" },
+      "emptyText": "Message"
+    },
+    {
+      "op": "type_text",
+      "goal": "Type the new text into the edit input",
+      "target": { "resourceId": "com.whatsapp:id/entry" }
+    },
+    {
+      "op": "send",
+      "goal": "Find the button that saves the edited message",
+      "target": { "resourceId": "com.whatsapp:id/send" },
+      "exitEdit": { "resourceId": "com.whatsapp:id/wds_toolbar_nav_button" }
+    },
+    {
+      "op": "confirm_edited",
+      "editTitle": { "text": "Edit message" },
+      "textBubble": { "resourceId": "com.whatsapp:id/message_text" },
+      "ownStatus": { "resourceId": "com.whatsapp:id/status" }
+    }
+  ]
+}
