@@ -379,7 +379,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           const question = nodes.find(node => node.text.startsWith('Send ') && node.text.includes(title))
           const cancel = find(nodes, selectorParam(step, 'dialogCancel'))
           const windows = await act(dumpUi(serial, true))
-          entry.note = `dialog: ${JSON.stringify(windows.filter(node => node.text || node.desc).map(node => `${node.resourceId}|${node.text}|${node.desc}`).slice(-12))}; header ${JSON.stringify(chatHeader)}`
+          entry.note = `dialog: ${JSON.stringify(windows.filter(node => node.text || node.desc).filter(node => !node.resourceId.startsWith('com.android.systemui')).map(node => `${node.resourceId}|${node.text}|${node.desc}`).slice(-12))}; header ${JSON.stringify(chatHeader)}`
           if (!question || !chatHeader || !question.text.includes(`to ${chatHeader}?`) || options.dryRun) {
             if (cancel) await tapNode(cancel)
             await run('input keyevent KEYCODE_BACK')
