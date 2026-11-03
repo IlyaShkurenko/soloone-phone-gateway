@@ -39,7 +39,7 @@ type MediaKind = 'image' | 'video' | 'voice' | 'audio' | 'document'
 
 interface PendingMedia { key: string; kind: MediaKind; time: number }
 
-interface BackendEvent { id: string; kind: 'message' | 'tick'; [field: string]: unknown }
+interface BackendEvent { id: string; kind: 'message' | 'tick' | 'outgoing'; [field: string]: unknown }
 
 interface PhoneState {
   names: Map<string, string>
@@ -217,6 +217,11 @@ async function pollNotifications(device: PhysicalDevice, serial: string, state: 
     const key = `n|${message.chat}|${message.time}|${message.text}`
     if (state.seen.has(key)) continue
     state.seen.add(key)
+    // A reaction notification reads like a message; reactions from the phone are not reported (RFC-012).
+    if (/^Reacted .+ to "/s.test(message.text)) {
+      await write(device.phone, { kind: 'reaction', key, ...message })
+      continue
+    }
     const kind = mediaKind(message)
     await write(device.phone, { kind: 'message', source: 'notification', key, ...message, ...(kind ? { media: kind } : {}) })
     const event = messageEvent(key, message.chat, message)
@@ -248,7 +253,7 @@ async function collectMedia(device: PhysicalDevice, serial: string, state: Phone
       await write(device.phone, { kind: 'media', key: item.key, file: match.file, saved: path.basename(target), size: match.size })
       const name = path.basename(target)
       await enqueue(device.phone, { ...item.event, media: {
-        kind: item.kind, fileName: path.basename(match.file), mimeType: mimeOf(match.file), caption: mediaCaption(String(item.event.text)),
+        kind: item.kind, fileName: path.basename(match.file).replace(/\.opus$/i, '.oga'), mimeType: mimeOf(match.file), caption: mediaCaption(String(item.event.text)),
         url: `http://127.0.0.1:${config.port}/v1/incoming-media/${encodeURIComponent(name)}?sig=${mediaSignature(name)}`
       } })
     } else if (Date.now() > item.time + MEDIA_WAIT_MS) {
@@ -264,7 +269,8 @@ async function collectMedia(device: PhysicalDevice, serial: string, state: Phone
 
 const MIME: Record<string, string> = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', mp4: 'video/mp4', '3gp': 'video/3gpp',
-  opus: 'audio/ogg', ogg: 'audio/ogg', m4a: 'audio/mp4', mp3: 'audio/mpeg', aac: 'audio/aac', pdf: 'application/pdf'
+  // Whapi stores voice notes as .oga with the codec named; iOS does not play the same file as plain audio/ogg .opus.
+  opus: 'audio/ogg; codecs=opus', ogg: 'audio/ogg; codecs=opus', m4a: 'audio/mp4', mp3: 'audio/mpeg', aac: 'audio/aac', pdf: 'application/pdf'
 }
 const mimeOf = (file: string) => MIME[path.extname(file).slice(1).toLowerCase()] || 'application/octet-stream'
 
@@ -324,6 +330,14 @@ function capturing(device: Device): PhysicalDevice | undefined {
 
 // Contract: PGW-23 — called under the device lock right before an operation opens a chat,
 // because opening the chat clears its notification.
+// Contract: PGW-31 — a text the phone sent is reported so the backend shows it in the chat; the backend
+// skips the ones it queued itself, which carry its own message ID.
+export async function reportOutgoing(device: Device, messageId: string, to: string, text: string): Promise<void> {
+  const physical = capturing(device)
+  if (!physical) return
+  await enqueue(physical.phone, { id: eventId(`o|${messageId}`), kind: 'outgoing', messageId, to, text, time: Date.now() })
+}
+
 export async function captureBeforeOperation(device: Device, serial: string): Promise<void> {
   const physical = capturing(device)
   if (!physical) return
@@ -332,8 +346,14 @@ export async function captureBeforeOperation(device: Device, serial: string): Pr
   await pollNotifications(physical, serial, state).catch(error => log.warn({ err: error, phone: physical.phone }, 'Incoming capture before operation failed'))
 }
 
-// Contract: PGW-25 — customer bubbles below our newest message arrived while the chat was open.
-export function chatCapture(device: Device, to: string): (serial: string) => Promise<void> {
+const sameText = (a: string, b: string) => {
+  const plain = (value: string) => value.replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim()
+  return plain(a) === plain(b)
+}
+
+// Contract: PGW-25 — after a text send, customer bubbles below the bubble we just sent arrived while the chat
+// was open. Other operations may leave the chat scrolled up, where older bubbles sit below ours, so they skip it.
+export function chatCapture(device: Device, to: string, sentText: string): (serial: string) => Promise<void> {
   return async (serial: string) => {
     const physical = capturing(device)
     if (!physical) return
@@ -350,8 +370,9 @@ export function chatCapture(device: Device, to: string): (serial: string) => Pro
     const dates = findAll(nodes, { resourceId: 'com.whatsapp:id/date' })
     const rowOf = (bubble: UiNode) => (node: UiNode) => node.bounds[1] >= bubble.bounds[1] - 20 && node.bounds[1] <= bubble.bounds[3] + 60
     const bubbles = findAll(nodes, { resourceId: 'com.whatsapp:id/message_text' })
-    const ownBottom = Math.max(-1, ...bubbles.filter(bubble => statuses.some(rowOf(bubble))).map(bubble => bubble.bounds[3]))
-    if (ownBottom < 0) return
+    const own = bubbles.filter(bubble => statuses.some(rowOf(bubble))).sort((a, b) => b.bounds[3] - a.bounds[3])[0]
+    if (!own || !sameText(own.text, sentText)) return
+    const ownBottom = own.bounds[3]
     for (const bubble of bubbles.filter(item => item.bounds[1] > ownBottom && !statuses.some(rowOf(item)))) {
       const label = dates.find(rowOf(bubble))?.text || ''
       const key = `c|${to}|${label}|${bubble.text}`

@@ -8,7 +8,7 @@ import { connect, release } from './drivers/index.js'
 import { SendFailure, SendUncertain } from './errors.js'
 import { RunError, runScript, type RunRequest } from './executor.js'
 import { saveFailure } from './failures.js'
-import { captureBeforeOperation, chatCapture, mediaSignature, startIncomingCapture } from './incoming.js'
+import { captureBeforeOperation, chatCapture, mediaSignature, reportOutgoing, startIncomingCapture } from './incoming.js'
 import { proposeFix } from './fixer.js'
 import { prepareMedia } from './media.js'
 import { startWatchdog } from './watchdog.js'
@@ -106,7 +106,7 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
         return await runScript(serial, activeScript, { ...request, media, pkg: whatsappPackage(device) }, {
           startedAt,
           onSendPressed: () => ledger.markSendPressed(request.messageId),
-          beforeLeave: chatCapture(device, request.to)
+          ...(request.text && !request.media ? { beforeLeave: chatCapture(device, request.to, request.text) } : {})
         })
       } finally {
         release(device, serial)
@@ -114,6 +114,7 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
     })
     await ledger.finish(request.messageId, 'sent')
     res.json({ outcome: 'sent' })
+    if (request.text && !request.media) void reportOutgoing(device, request.messageId, request.to, request.text).catch(error => log.warn({ err: error }, 'Outgoing text not queued for the backend'))
     if (needsFix(result.trace)) void proposeFix({ script, reason: 'The run needed recovery actions', trace: result.trace })
   } catch (error) {
     const failure = error instanceof RunError ? error.failure : error
@@ -188,7 +189,7 @@ async function sendReaction(req: Request, res: Response): Promise<void> {
             previousEmoji: isEmoji(body.previousEmoji) ? body.previousEmoji : undefined,
             text, mediaType, sentAt: typeof target.sentAt === 'string' ? target.sentAt : undefined
           }
-        }, { startedAt, onSendPressed: () => ledger.markSendPressed(reactionId), beforeLeave: chatCapture(device, body.to as string) })
+        }, { startedAt, onSendPressed: () => ledger.markSendPressed(reactionId) })
       } finally {
         release(device, serial)
       }
@@ -255,7 +256,7 @@ async function sendDeletion(req: Request, res: Response): Promise<void> {
         return await runScript(serial, script, {
           messageId: deletionId, to: body.to as string, pkg: whatsappPackage(device),
           deletion: { text, mediaType, sentAt: typeof target.sentAt === 'string' ? target.sentAt : undefined }
-        }, { startedAt, onSendPressed: () => ledger.markSendPressed(deletionId), beforeLeave: chatCapture(device, body.to as string) })
+        }, { startedAt, onSendPressed: () => ledger.markSendPressed(deletionId) })
       } finally {
         release(device, serial)
       }
@@ -325,7 +326,7 @@ async function sendEdit(req: Request, res: Response): Promise<void> {
           messageId: editId, to: body.to as string, pkg: whatsappPackage(device), text: body.text as string,
           typingTimeMs: typeof body.typingTimeMs === 'number' ? Math.max(500, Math.min(30_000, body.typingTimeMs)) : undefined,
           edit: { text: target.text as string, sentAt: typeof target.sentAt === 'string' ? target.sentAt : undefined }
-        }, { startedAt, onSendPressed: () => ledger.markSendPressed(editId), beforeLeave: chatCapture(device, body.to as string) })
+        }, { startedAt, onSendPressed: () => ledger.markSendPressed(editId) })
       } finally {
         release(device, serial)
       }
