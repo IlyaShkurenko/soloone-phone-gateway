@@ -234,7 +234,7 @@ async function readTicks(device: PhysicalDevice, serial: string, state: PhoneSta
 }
 
 function capturing(device: Device): PhysicalDevice | undefined {
-  return device.driver === 'physical' && device.captureIncoming ? device : undefined
+  return device.driver === 'physical' && device.captureIncoming !== false ? device : undefined
 }
 
 // Contract: PGW-23 — called under the device lock right before an operation opens a chat,
@@ -301,7 +301,7 @@ export function startIncomingCapture(): void {
   const offline = new Set<string>()
   const run = async () => {
     const devices = (JSON.parse(await readFile(config.devicesFile, 'utf8')) as Device[])
-      .filter((device): device is PhysicalDevice => device.driver === 'physical' && device.captureIncoming === true)
+      .filter((device): device is PhysicalDevice => device.driver === 'physical' && device.captureIncoming !== false)
     for (const device of devices) {
       // A slow round must not stack up behind itself.
       if (busy.has(device.phone)) continue

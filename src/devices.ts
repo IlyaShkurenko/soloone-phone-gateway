@@ -3,7 +3,7 @@ import { config } from './config.js'
 
 export type Device =
   | { phone: string; driver: 'multilogin'; profileId: string; whatsappPackage?: string }
-  // `captureIncoming` turns on the RFC-012 phase 1 recording for that phone (PGW-23).
+  // Physical phones record incoming messages (RFC-012 phase 1, PGW-23) unless `captureIncoming` is false.
   | { phone: string; driver: 'physical'; adbAddress: string; whatsappPackage?: string; captureIncoming?: boolean }
 
 function validate(value: unknown): Device {
