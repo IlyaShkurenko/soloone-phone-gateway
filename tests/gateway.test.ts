@@ -82,3 +82,58 @@ test('shipped scripts are valid', async () => {
     validateScript(JSON.parse(await readFile(`scripts/${name}.json`, 'utf8')))
   }
 })
+
+const { parseNotifications, mediaKind, classifyTick } = await import('../src/incoming.js')
+
+// Shape of the phone-side filtered dump, taken from port41 on 2026-11-03.
+const notificationDump = `@@record
+                android.template=String (android.app.Notification$InboxStyle)
+      shortcut=253197079818371@lid found valid? true
+@@record
+                android.template=String (android.app.Notification$MessagingStyle)
+                  [0] Bundle[{extras=Bundle[{}], sender_person=android.app.Person@17823278, sender=Mr Ill, text=Hello, dear, time=1793712810000}]
+                  [1] Bundle[{extras=Bundle[{}], sender_person=android.app.Person@1ee144d, sender=Mr Ill, uri=content://com.whatsapp.provider.media/item/84aac76b, text=📷 Sent a photo, time=1793712818000, type=image/jpeg}]
+                  [2] Bundle[{extras=Bundle[{}], sender_person=android.app.Person@806a21fe, sender=Mr Ill, text=two
+lines, time=1793712821000}]
+                  [3] Bundle[{extras=Bundle[{}], sender=null, text=our reply, time=1793712830000}]
+                android.isGroupConversation=Boolean (false)
+      shortcut=253197079818371@lid found valid? true
+@@record
+                android.template=String (android.app.Notification$MessagingStyle)
+                  [0] Bundle[{extras=Bundle[{}], sender_person=android.app.Person@1, sender=Ann, text=group hello, time=1793712840000}]
+                android.isGroupConversation=Boolean (true)
+      shortcut=120363000000000000@g.us found valid? true
+`
+
+// Contract: PGW-23
+test('notification messages are read per message, skipping summaries, groups and our own lines', () => {
+  const messages = parseNotifications(notificationDump)
+  assert.deepEqual(messages.map(message => [message.chat, message.sender, message.text, message.time]), [
+    ['253197079818371@lid', 'Mr Ill', 'Hello, dear', 1793712810000],
+    ['253197079818371@lid', 'Mr Ill', '📷 Sent a photo', 1793712818000],
+    ['253197079818371@lid', 'Mr Ill', 'two\nlines', 1793712821000]
+  ])
+  assert.equal(messages[1].mimeType, 'image/jpeg')
+})
+
+// Contract: PGW-24
+test('notification text tells the media type', () => {
+  const kind = (text: string, mimeType?: string) => mediaKind({ chat: 'x', sender: 'y', text, time: 0, mimeType })
+  assert.equal(kind('📷 Sent a photo', 'image/jpeg'), 'image')
+  assert.equal(kind('🎥 Video'), 'video')
+  assert.equal(kind('🎤 Voice message (0:05)'), 'voice')
+  assert.equal(kind('Hello'), undefined)
+})
+
+// Contract: PGW-26
+test('a tick icon is classified by colour and width', () => {
+  const icon = (width: number, height: number, ink: [number, number, number], from: number, to: number) => {
+    const rgb = Buffer.alloc(width * height * 3, 20)
+    for (let y = 10; y < 20; y++) for (let x = from; x < to; x++) rgb.set(ink, (y * width + x) * 3)
+    return rgb
+  }
+  assert.equal(classifyTick(icon(50, 30, [72, 164, 235], 5, 45), 50).tick, 'read')
+  assert.equal(classifyTick(icon(50, 30, [140, 150, 155], 5, 45), 50).tick, 'delivered')
+  assert.equal(classifyTick(icon(50, 30, [140, 150, 155], 15, 35), 50).tick, 'sent')
+  assert.equal(classifyTick(Buffer.alloc(50 * 30 * 3, 20), 50).tick, 'unknown')
+})

@@ -53,6 +53,12 @@ export async function screenshot(serial: string): Promise<Buffer> {
   return withReconnect(args, () => run(args, 20_000, true) as Promise<Buffer>)
 }
 
+// Reads a file from the phone as bytes.
+export async function pull(serial: string, file: string): Promise<Buffer> {
+  const args = ['-s', serial, 'exec-out', `cat ${quote(file)}`]
+  return withReconnect(args, () => run(args, 60_000, true) as Promise<Buffer>)
+}
+
 export async function topActivity(serial: string): Promise<string> {
   const output = await shell(serial, 'dumpsys activity activities | grep -m1 topResumedActivity')
   return output.match(/\{[^}]*\s(\S+\/\S+)\s/)?.[1] || output.trim()

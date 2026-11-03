@@ -32,6 +32,8 @@ export interface RunOptions {
   dryRun?: boolean
   startedAt: number
   onSendPressed: () => Promise<void>
+  // Runs before the chat is left, while it is still on screen (PGW-25).
+  beforeLeave?: (serial: string) => Promise<void>
 }
 
 export interface TraceEntry {
@@ -497,6 +499,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
   } finally {
     if (!staged && request.media?.prepared) await request.media.prepared.then(discardPrepared).catch(() => undefined)
     await staged?.cleanup()
+    if (options.beforeLeave) await options.beforeLeave(serial).catch(() => undefined)
     // Contract: PGW-11 — an open chat would mark new incoming messages as read.
     await run('input keyevent KEYCODE_HOME').catch(() => undefined)
   }

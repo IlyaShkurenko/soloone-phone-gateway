@@ -7,6 +7,7 @@ import { connect, release } from './drivers/index.js'
 import { SendFailure, SendUncertain } from './errors.js'
 import { RunError, runScript, type RunRequest } from './executor.js'
 import { saveFailure } from './failures.js'
+import { captureBeforeOperation, chatCapture, startIncomingCapture } from './incoming.js'
 import { proposeFix } from './fixer.js'
 import { prepareMedia } from './media.js'
 import { startWatchdog } from './watchdog.js'
@@ -99,10 +100,12 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
     media?.prepared?.catch(() => undefined)
     const result = await runOnDevice(device.phone, async () => {
       const serial = await connect(device)
+      await captureBeforeOperation(device, serial)
       try {
         return await runScript(serial, activeScript, { ...request, media, pkg: whatsappPackage(device) }, {
           startedAt,
-          onSendPressed: () => ledger.markSendPressed(request.messageId)
+          onSendPressed: () => ledger.markSendPressed(request.messageId),
+          beforeLeave: chatCapture(device, request.to)
         })
       } finally {
         release(device, serial)
@@ -175,6 +178,7 @@ async function sendReaction(req: Request, res: Response): Promise<void> {
     const reactionId = body.reactionId
     await runOnDevice(device.phone, async () => {
       const serial = await connect(device)
+      await captureBeforeOperation(device, serial)
       try {
         return await runScript(serial, script, {
           messageId: reactionId, to: body.to as string, pkg: whatsappPackage(device),
@@ -183,7 +187,7 @@ async function sendReaction(req: Request, res: Response): Promise<void> {
             previousEmoji: isEmoji(body.previousEmoji) ? body.previousEmoji : undefined,
             text, mediaType, sentAt: typeof target.sentAt === 'string' ? target.sentAt : undefined
           }
-        }, { startedAt, onSendPressed: () => ledger.markSendPressed(reactionId) })
+        }, { startedAt, onSendPressed: () => ledger.markSendPressed(reactionId), beforeLeave: chatCapture(device, body.to as string) })
       } finally {
         release(device, serial)
       }
@@ -245,11 +249,12 @@ async function sendDeletion(req: Request, res: Response): Promise<void> {
     const script = await loadScript('delete')
     await runOnDevice(device.phone, async () => {
       const serial = await connect(device)
+      await captureBeforeOperation(device, serial)
       try {
         return await runScript(serial, script, {
           messageId: deletionId, to: body.to as string, pkg: whatsappPackage(device),
           deletion: { text, mediaType, sentAt: typeof target.sentAt === 'string' ? target.sentAt : undefined }
-        }, { startedAt, onSendPressed: () => ledger.markSendPressed(deletionId) })
+        }, { startedAt, onSendPressed: () => ledger.markSendPressed(deletionId), beforeLeave: chatCapture(device, body.to as string) })
       } finally {
         release(device, serial)
       }
@@ -313,12 +318,13 @@ async function sendEdit(req: Request, res: Response): Promise<void> {
     const script = await loadScript('edit')
     await runOnDevice(device.phone, async () => {
       const serial = await connect(device)
+      await captureBeforeOperation(device, serial)
       try {
         return await runScript(serial, script, {
           messageId: editId, to: body.to as string, pkg: whatsappPackage(device), text: body.text as string,
           typingTimeMs: typeof body.typingTimeMs === 'number' ? Math.max(500, Math.min(30_000, body.typingTimeMs)) : undefined,
           edit: { text: target.text as string, sentAt: typeof target.sentAt === 'string' ? target.sentAt : undefined }
-        }, { startedAt, onSendPressed: () => ledger.markSendPressed(editId) })
+        }, { startedAt, onSendPressed: () => ledger.markSendPressed(editId), beforeLeave: chatCapture(device, body.to as string) })
       } finally {
         release(device, serial)
       }
@@ -366,6 +372,7 @@ async function dryRun(req: Request, res: Response): Promise<void> {
   try {
     const result = await runOnDevice(device.phone, async () => {
       const serial = await connect(device)
+      await captureBeforeOperation(device, serial)
       try {
         return await runScript(serial, proposal.script, { ...parsed.request, pkg: whatsappPackage(device) }, {
           dryRun: true,
@@ -413,3 +420,4 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
 app.listen(config.port, config.host, () => log.info({ host: config.host, port: config.port }, 'Phone gateway started'))
 startWatchdog()
+startIncomingCapture()
