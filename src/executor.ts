@@ -378,7 +378,8 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           // The dialog reads 'Send "<title>" to <chat>?'; the quote marks are not always plain ones.
           const question = nodes.find(node => node.text.startsWith('Send ') && node.text.includes(title))
           const cancel = find(nodes, selectorParam(step, 'dialogCancel'))
-          entry.note = `dialog: ${JSON.stringify(question?.text ?? nodes.filter(node => node.text).map(node => node.text).slice(0, 8))}; header ${JSON.stringify(chatHeader)}`
+          const windows = await act(dumpUi(serial, true))
+          entry.note = `dialog: ${JSON.stringify(windows.filter(node => node.text || node.desc).map(node => `${node.resourceId}|${node.text}|${node.desc}`).slice(-12))}; header ${JSON.stringify(chatHeader)}`
           if (!question || !chatHeader || !question.text.includes(`to ${chatHeader}?`) || options.dryRun) {
             if (cancel) await tapNode(cancel)
             await run('input keyevent KEYCODE_BACK')
