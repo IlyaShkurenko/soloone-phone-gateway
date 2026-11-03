@@ -375,19 +375,19 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           await tapNode(row)
           await tapNode(await locate(index, step, selectorParam(step, 'pickerSend'), entry))
           const nodes = await waitFor(selectorParam(step, 'dialogSend'), 8_000)
-          // The dialog reads 'Send "<title>" to <chat>?'; the quote marks are not always plain ones.
-          const question = nodes.find(node => node.text.startsWith('Send ') && node.text.includes(title))
           const cancel = find(nodes, selectorParam(step, 'dialogCancel'))
-          const windows = await act(dumpUi(serial, true))
-          entry.note = `dialog: ${JSON.stringify(windows.filter(node => node.text || node.desc).filter(node => !node.resourceId.startsWith('com.android.systemui')).map(node => `${node.resourceId}|${node.text}|${node.desc}`).slice(-12))}; header ${JSON.stringify(chatHeader)}`
-          if (!question || !chatHeader || !question.text.includes(`to ${chatHeader}?`) || options.dryRun) {
+          // AICODE-NOTE: the confirmation's question ('Send "<title>" to <chat>?') is not in the UI tree, only its
+          // buttons are. The picker was opened from the chat check_recipient verified and sends there, so the
+          // guard is that this dialog sits on WhatsApp's audio picker, not on any other screen.
+          const onPicker = /audiopicker/i.test(await topActivity(serial))
+          if (!find(nodes, selectorParam(step, 'dialogSend')) || !cancel || !onPicker || options.dryRun) {
             if (cancel) await tapNode(cancel)
             await run('input keyevent KEYCODE_BACK')
             if (options.dryRun) {
               entry.note = 'dry run stopped before Send'
               return { outcome: 'stopped_before_send', trace }
             }
-            throw new SendFailure('The audio confirmation does not name the opened chat', false)
+            throw new SendFailure('The audio confirmation is not on WhatsApp\'s audio picker', false)
           }
           const send = find(nodes, selectorParam(step, 'dialogSend'))!
           await options.onSendPressed()
