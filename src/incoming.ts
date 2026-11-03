@@ -152,11 +152,11 @@ async function loadState(phone: string): Promise<PhoneState> {
   for (const name of files) {
     for (const line of (await readFile(path.join(dir(), name), 'utf8')).split('\n')) {
       if (!line) continue
-      const record = JSON.parse(line) as { phone?: string; key?: string; file?: string; kind?: string; chat?: string; tick?: string }
+      const record = JSON.parse(line) as { phone?: string; key?: string; file?: string; kind?: string; chat?: string; tick?: string; preview?: string }
       if (record.phone !== phone) continue
       if (record.key) state.seen.add(record.key)
       if (record.file) state.usedFiles.add(record.file)
-      if (record.kind === 'tick' && record.chat && record.tick) state.ticks.set(record.chat, record.tick)
+      if (record.kind === 'tick' && record.chat && record.tick) state.ticks.set(`${record.chat}|${record.preview ?? ''}`, record.tick)
     }
   }
   const names = await readFile(path.join(dir(), `names-${phone}.json`), 'utf8').then(JSON.parse).catch(() => ({})) as Record<string, string>
@@ -312,8 +312,10 @@ async function readTicks(device: PhysicalDevice, serial: string, state: PhoneSta
     const reading = classifyTick(await cropRaw(png, icon.bounds), icon.bounds[2] - icon.bounds[0])
     const preview = nodes.find(node => node.resourceId === 'com.whatsapp:id/single_msg_tv' && inside(node, row))?.text || ''
     const date = nodes.find(node => node.resourceId === 'com.whatsapp:id/conversations_row_date' && inside(node, row))?.text || ''
-    if (state.ticks.get(name.text) === reading.tick) continue
-    state.ticks.set(name.text, reading.tick)
+    // A new message of ours in the same chat can reach the same tick as the previous one, so the preview is part of the key.
+    const tickKey = `${name.text}|${preview}`
+    if (state.ticks.get(tickKey) === reading.tick) continue
+    state.ticks.set(tickKey, reading.tick)
     await write(device.phone, { kind: 'tick', chat: name.text, preview, date, ...reading })
     // Contract: PGW-30 — a name is a phone number or the chat header seen when the gateway last opened that chat.
     const digits = name.text.replace(/[\s()+-]/g, '')
