@@ -147,3 +147,12 @@ test("WhatsApp's media placeholder is not a caption", () => {
   assert.equal(mediaCaption('🎤 Voice message (0:05)'), undefined)
   assert.equal(mediaCaption('📷 Look at this'), 'Look at this')
 })
+
+const { phoneFromName } = await import('../src/incoming.js')
+
+// Contract: PGW-35
+test('a contact shown by number gives its phone, a saved name does not', () => {
+  assert.equal(phoneFromName('+44 7916 353019'), '447916353019')
+  assert.equal(phoneFromName('Mr Ill'), undefined)
+  assert.equal(phoneFromName(undefined), undefined)
+})

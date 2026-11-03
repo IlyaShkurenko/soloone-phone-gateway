@@ -39,10 +39,12 @@ type MediaKind = 'image' | 'video' | 'voice' | 'audio' | 'document'
 
 interface PendingMedia { key: string; kind: MediaKind; time: number }
 
-interface BackendEvent { id: string; kind: 'message' | 'tick' | 'outgoing'; [field: string]: unknown }
+interface BackendEvent { id: string; kind: 'message' | 'tick' | 'outgoing' | 'state' | 'profile'; [field: string]: unknown }
 
 interface PhoneState {
   names: Map<string, string>
+  profiled: Set<string>
+  profileQueue: Array<{ chat: string; phone: string }>
   seen: Set<string>
   usedFiles: Set<string>
   pending: Array<PendingMedia & { event: BackendEvent }>
@@ -147,7 +149,7 @@ async function write(phone: string, record: Record<string, unknown>): Promise<vo
 async function loadState(phone: string): Promise<PhoneState> {
   const existing = states.get(phone)
   if (existing) return existing
-  const state: PhoneState = { names: new Map(), seen: new Set(), usedFiles: new Set(), pending: [], ticks: new Map(), lastOperationAt: 0, lastTicksAt: 0 }
+  const state: PhoneState = { names: new Map(), profiled: new Set(), profileQueue: [], seen: new Set(), usedFiles: new Set(), pending: [], ticks: new Map(), lastOperationAt: 0, lastTicksAt: 0 }
   const files = (await readdir(dir()).catch(() => [] as string[])).filter(name => name.endsWith('.jsonl')).sort().slice(-2)
   for (const name of files) {
     for (const line of (await readFile(path.join(dir(), name), 'utf8')).split('\n')) {
@@ -161,6 +163,8 @@ async function loadState(phone: string): Promise<PhoneState> {
   }
   const names = await readFile(path.join(dir(), `names-${phone}.json`), 'utf8').then(JSON.parse).catch(() => ({})) as Record<string, string>
   for (const [name, to] of Object.entries(names)) state.names.set(name, to)
+  const profiled = await readFile(path.join(dir(), `profiled-${phone}.json`), 'utf8').then(JSON.parse).catch(() => []) as string[]
+  for (const chat of profiled) state.profiled.add(chat)
   states.set(phone, state)
   return state
 }
@@ -182,15 +186,26 @@ async function enqueue(phone: string, event: BackendEvent): Promise<void> {
   await writeFile(outboxFile(), JSON.stringify(queue))
 }
 
+const PARK_AFTER_FAILURES = 10
 let flushing = false
+let failures = 0
 async function flushOutbox(): Promise<void> {
   if (!config.backendEventsUrl || flushing) return
   flushing = true
   try {
     const queue = await loadOutbox()
+    // Contract: PGW-28 — after a failure events go one by one, and one the backend keeps refusing is set
+    // aside in parked.json so it cannot hold back every later message of that phone.
+    if (failures >= PARK_AFTER_FAILURES && queue.length) {
+      const parked = queue.shift()!
+      await appendFile(path.join(dir(), 'parked.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), ...parked })}\n`)
+      await writeFile(outboxFile(), JSON.stringify(queue))
+      log.warn({ phone: parked.phone, eventId: parked.event.id, kind: parked.event.kind }, 'Phone event set aside after repeated backend failures')
+      failures = 0
+    }
     while (queue.length) {
       const phone = queue[0].phone
-      const batch = queue.slice(0, 50).filter(item => item.phone === phone)
+      const batch = queue.slice(0, failures ? 1 : 50).filter(item => item.phone === phone)
       const response = await fetch(config.backendEventsUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.token}` },
@@ -198,7 +213,11 @@ async function flushOutbox(): Promise<void> {
         signal: AbortSignal.timeout(60_000)
       })
       await response.body?.cancel()
-      if (!response.ok) throw new Error(`Backend returned ${response.status} for phone events`)
+      if (!response.ok) {
+        failures++
+        throw new Error(`Backend returned ${response.status} for phone events`)
+      }
+      failures = 0
       queue.splice(0, batch.length)
       await writeFile(outboxFile(), JSON.stringify(queue))
     }
@@ -207,8 +226,20 @@ async function flushOutbox(): Promise<void> {
   }
 }
 
+// A contact not saved on the phone is shown by its number, which ties the LID chat to a phone (WA-PGW-IN-10).
+export function phoneFromName(name: string | undefined): string | undefined {
+  const digits = name?.replace(/[\s()+-]/g, '')
+  return digits && /^\d{7,15}$/.test(digits) ? digits : undefined
+}
+
 function messageEvent(key: string, chat: string, message: { sender?: string; text: string; time: number }): BackendEvent {
-  return { id: eventId(key), kind: 'message', chat, senderName: message.sender, text: message.text, time: message.time }
+  const phone = phoneFromName(message.sender)
+  return { id: eventId(key), kind: 'message', chat, senderName: message.sender, text: message.text, time: message.time, ...(phone ? { phone } : {}) }
+}
+
+// Contract: PGW-33 — the backend treats a phone-sending number as connected while its phone answers.
+export async function reportPhoneState(phone: string, online: boolean): Promise<void> {
+  await enqueue(phone, { id: eventId(`s|${phone}|${online}|${Date.now()}`), kind: 'state', online, time: Date.now() })
 }
 
 async function pollNotifications(device: PhysicalDevice, serial: string, state: PhoneState): Promise<void> {
@@ -225,6 +256,11 @@ async function pollNotifications(device: PhysicalDevice, serial: string, state: 
     const kind = mediaKind(message)
     await write(device.phone, { kind: 'message', source: 'notification', key, ...message, ...(kind ? { media: kind } : {}) })
     const event = messageEvent(key, message.chat, message)
+    // Contract: PGW-35 — a sender the phone shows only by number gets its WhatsApp profile name read once.
+    const senderPhone = phoneFromName(message.sender)
+    if (senderPhone && !state.profiled.has(message.chat) && !state.profileQueue.some(item => item.chat === message.chat)) {
+      state.profileQueue.push({ chat: message.chat, phone: senderPhone })
+    }
     // A media message waits for its file so the backend gets both together.
     if (kind) state.pending.push({ key, kind, time: message.time, event })
     else await enqueue(device.phone, event)
@@ -318,12 +354,40 @@ async function readTicks(device: PhysicalDevice, serial: string, state: PhoneSta
     state.ticks.set(tickKey, reading.tick)
     await write(device.phone, { kind: 'tick', chat: name.text, preview, date, ...reading })
     // Contract: PGW-30 — a name is a phone number or the chat header seen when the gateway last opened that chat.
-    const digits = name.text.replace(/[\s()+-]/g, '')
-    const to = /^\d{7,15}$/.test(digits) ? digits : state.names.get(name.text)
+    const to = phoneFromName(name.text) || state.names.get(name.text)
     if (to && (reading.tick === 'delivered' || reading.tick === 'read')) {
       await enqueue(device.phone, { id: eventId(`t|${to}|${reading.tick}|${preview}|${Date.now()}`), kind: 'tick', to, tick: reading.tick, preview })
     }
   }
+}
+
+async function readProfile(device: PhysicalDevice, serial: string, state: PhoneState, item: { chat: string; phone: string }): Promise<void> {
+  const pkg = whatsappPackage(device)
+  let title: string | undefined
+  let subtitle: string | undefined
+  try {
+    await shell(serial, `input keyevent KEYCODE_WAKEUP; am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${item.phone}`)} -p ${quote(pkg)} >/dev/null`)
+    let header: UiNode | undefined
+    for (const until = Date.now() + 12_000; !header && Date.now() < until; await sleep(800)) {
+      header = find(await dumpUi(serial), { resourceId: 'com.whatsapp:id/conversation_contact' })
+    }
+    if (!header) return
+    await tap(serial, header)
+    for (const until = Date.now() + 10_000; !title && Date.now() < until; await sleep(800)) {
+      const nodes = await dumpUi(serial)
+      title = find(nodes, { resourceId: 'com.whatsapp:id/contact_title' })?.text
+      subtitle = find(nodes, { resourceId: 'com.whatsapp:id/contact_subtitle' })?.text
+    }
+  } finally {
+    await shell(serial, 'input keyevent KEYCODE_BACK; input keyevent KEYCODE_HOME').catch(() => undefined)
+    state.lastOperationAt = Date.now()
+  }
+  // The profile screen shows the saved name or the number as its title and "~ name" for the name the person set.
+  const name = subtitle?.startsWith('~') ? subtitle : title && !phoneFromName(title) ? title : undefined
+  state.profiled.add(item.chat)
+  await writeFile(path.join(dir(), `profiled-${device.phone}.json`), JSON.stringify([...state.profiled]))
+  await write(device.phone, { kind: 'profile', chat: item.chat, phone: item.phone, title, subtitle })
+  if (name) await enqueue(device.phone, { id: eventId(`p|${item.chat}`), kind: 'profile', chat: item.chat, phone: item.phone, name })
 }
 
 function capturing(device: Device): PhysicalDevice | undefined {
@@ -404,6 +468,8 @@ async function tick(device: PhysicalDevice): Promise<void> {
     const serial = await connect(device)
     await pollNotifications(device, serial, state)
     await collectMedia(device, serial, state)
+    const profile = state.profileQueue.shift()
+    if (profile) await readProfile(device, serial, state, profile)
     const idle = Date.now() - state.lastOperationAt >= TICKS_EVERY_MS
     if (idle && Date.now() - state.lastTicksAt >= TICKS_EVERY_MS) {
       state.lastTicksAt = Date.now()

@@ -45,11 +45,12 @@ function parseBody(body: MessageBody): { from: string; request: Omit<RunRequest,
   const base = { messageId: body.messageId, to: body.to }
   if (body.media) {
     const media = body.media
-    if (media.voice === true) return 'Voice notes are not supported by the phone gateway yet'
-    if (media.type !== 'image' && media.type !== 'video') return `Media type ${String(media.type)} is not supported by the phone gateway`
+    // A voice note goes out as an audio file: a phone without root cannot record one (PGW-32).
+    const type = media.voice === true || media.type === 'audio' ? 'audio' : media.type
+    if (type !== 'image' && type !== 'video' && type !== 'audio') return `Media type ${String(media.type)} is not supported by the phone gateway`
     if (typeof media.url !== 'string' || !/^https?:\/\//.test(media.url)) return 'media.url is invalid'
     return { from: body.from, request: { ...base, media: {
-      type: media.type, url: media.url,
+      type, url: media.url,
       fileName: typeof media.fileName === 'string' ? media.fileName : 'media',
       mimeType: typeof media.mimeType === 'string' ? media.mimeType : undefined,
       caption: typeof media.caption === 'string' ? media.caption : undefined,
@@ -94,7 +95,7 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
   try {
     const device = await findDevice(from)
     if (!device) throw new SendFailure(`No phone is registered for ${from}`, false)
-    script = await loadScript(request.media ? 'send_media' : 'send_text')
+    script = await loadScript(request.media?.type === 'audio' ? 'send_audio' : request.media ? 'send_media' : 'send_text')
     const activeScript = script
     // Download and convert while the phone is being started or connected.
     const media = request.media ? { ...request.media, prepared: prepareMedia(request.messageId, request.media) } : undefined

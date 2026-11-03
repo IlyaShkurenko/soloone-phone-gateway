@@ -1,0 +1,37 @@
+{
+  "name": "send_audio",
+  "version": 1,
+  "steps": [
+    {
+      "op": "open_chat",
+      "goal": "Open the WhatsApp chat with the recipient and show the message input",
+      "target": { "resourceId": "com.whatsapp:id/entry" },
+      "header": { "resourceId": "com.whatsapp:id/conversation_contact_name" },
+      "notOnWhatsapp": { "textContains": "isn't on WhatsApp" },
+      "retryDialog": { "resourceId": "android:id/message", "textContains": "Couldn't connect" },
+      "retryConfirm": { "resourceId": "android:id/button1" }
+    },
+    {
+      "op": "check_recipient",
+      "header": { "resourceId": "com.whatsapp:id/conversation_contact_name" },
+      "activity": "Conversation"
+    },
+    {
+      "op": "send_audio",
+      "goal": "Attach the audio file through Document and Browse audio, then send it",
+      "attach": { "resourceId": "com.whatsapp:id/input_attach_button" },
+      "document": { "text": "Document" },
+      "browseAudio": { "text": "Browse audio" },
+      "allow": { "text": "Allow" },
+      "pickerSend": { "resourceId": "com.whatsapp:id/fab" },
+      "dialogSend": { "text": "Send" },
+      "dialogCancel": { "text": "Cancel" },
+      "audioMessage": { "descPattern": "^You, audio message" }
+    },
+    {
+      "op": "confirm_audio",
+      "activity": "Conversation",
+      "audioMessage": { "descPattern": "^You, audio message" }
+    }
+  ]
+}

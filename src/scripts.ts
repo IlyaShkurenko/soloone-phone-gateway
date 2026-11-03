@@ -6,7 +6,7 @@ import type { Selector } from './ui.js'
 
 export const GUARDED_OPS = [
   'open_chat', 'share_media', 'clear_input', 'type_text', 'type_caption',
-  'ensure_view_once', 'check_recipient', 'send', 'confirm_sent',
+  'ensure_view_once', 'check_recipient', 'send', 'confirm_sent', 'send_audio', 'confirm_audio',
   'find_message', 'open_reactions', 'choose_reaction', 'confirm_reaction',
   'delete_for_everyone', 'confirm_deleted', 'open_edit', 'confirm_edited'
 ] as const

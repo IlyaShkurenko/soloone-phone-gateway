@@ -3,13 +3,14 @@ import { readFile } from 'node:fs/promises'
 import { shell } from './adb.js'
 import { config } from './config.js'
 import type { Device } from './devices.js'
+import { reportPhoneState } from './incoming.js'
 import { log } from './logger.js'
 
 const CHECK_EVERY_MS = 5 * 60 * 1000
 // Two misses in a row (about 10 minutes) before alerting, so a short Wi-Fi blip stays quiet.
 const MISSES_BEFORE_ALERT = 2
 
-interface State { misses: number; alerted: boolean; downSince?: string }
+interface State { misses: number; alerted: boolean; downSince?: string; reported?: boolean }
 const states = new Map<string, State>()
 
 async function sendEmail(subject: string, text: string): Promise<void> {
@@ -40,16 +41,22 @@ async function checkOnce(): Promise<void> {
   for (const device of devices) {
     const state = states.get(device.phone) || { misses: 0, alerted: false }
     if (await alive(device)) {
+      if (state.reported !== true) await reportPhoneState(device.phone, true).catch(() => undefined)
       if (state.alerted) {
         await sendEmail(`Phone +${device.phone} is back online`,
           `The phone +${device.phone} (${device.adbAddress}) answers over ADB again. It was offline since ${state.downSince}.\n\nMessages for this number go out through the phone again.`)
         log.info({ phone: device.phone }, 'Physical phone is back online')
       }
-      states.set(device.phone, { misses: 0, alerted: false })
+      states.set(device.phone, { misses: 0, alerted: false, reported: true })
       continue
     }
     state.misses += 1
     state.downSince ||= new Date().toISOString()
+    // Two misses, as for the alert, before the backend stops treating the phone as connected (PGW-33).
+    if (state.misses >= MISSES_BEFORE_ALERT && state.reported !== false) {
+      await reportPhoneState(device.phone, false).catch(() => undefined)
+      state.reported = false
+    }
     if (state.misses >= MISSES_BEFORE_ALERT && !state.alerted) {
       state.alerted = true
       await sendEmail(`Phone +${device.phone} is offline`, [

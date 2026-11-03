@@ -8,7 +8,7 @@ import { SendFailure } from './errors.js'
 const MAX_BYTES = 64 * 1024 * 1024
 const EXTENSIONS: Record<string, string> = {
   'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif',
-  'video/mp4': 'mp4', 'video/3gpp': '3gp', 'video/quicktime': 'mov'
+  'video/mp4': 'mp4', 'video/3gpp': '3gp', 'video/quicktime': 'mov', 'audio/mp4': 'm4a'
 }
 
 export interface StagedMedia {
@@ -18,7 +18,9 @@ export interface StagedMedia {
   cleanup: () => Promise<void>
 }
 
-function mimeFor(type: 'image' | 'video', mimeType: string | undefined, fileName: string): string {
+function mimeFor(type: 'image' | 'video' | 'audio', mimeType: string | undefined, fileName: string): string {
+  // Audio is always re-encoded, so its source type only names the temporary file.
+  if (type === 'audio') return 'audio/source'
   if (mimeType && EXTENSIONS[mimeType]) return mimeType
   const extension = path.extname(fileName).slice(1).toLowerCase()
   const known = Object.entries(EXTENSIONS).find(([, value]) => value === extension)?.[0]
@@ -45,6 +47,14 @@ async function toJpeg(input: string, output: string): Promise<void> {
   throw new SendFailure('This photo format cannot be sent from the phone', false)
 }
 
+// Contract: PGW-32 — one known audio format and a unique title, which is what WhatsApp's audio list shows.
+async function toM4a(input: string, output: string, title: string): Promise<void> {
+  if (await ffmpeg(['-i', input, '-vn', '-ac', '1', '-c:a', 'aac', '-b:a', '96k', '-metadata', `title=${title}`, output])) return
+  throw new SendFailure('This audio format cannot be sent from the phone', false)
+}
+
+export const audioTitle = (name: string) => name.replace(/\.m4a$/, '')
+
 // The file name is derived from the backend message ID, so it is safe inside device shell quotes.
 export interface PreparedMedia {
   name: string
@@ -55,14 +65,15 @@ export interface PreparedMedia {
 
 // Download and convert on the server. Independent of the phone, so it can overlap with connecting (PGW-15).
 export async function prepareMedia(messageId: string, media: {
-  type: 'image' | 'video'; url: string; fileName: string; mimeType?: string
+  type: 'image' | 'video' | 'audio'; url: string; fileName: string; mimeType?: string
 }): Promise<PreparedMedia> {
   const sourceMime = mimeFor(media.type, media.mimeType, media.fileName)
-  const mimeType = media.type === 'video' ? 'video/mp4' : 'image/jpeg'
-  const base = `soloone-${messageId.replace(/[^\w-]/g, '')}`
+  const mimeType = media.type === 'video' ? 'video/mp4' : media.type === 'audio' ? 'audio/mp4' : 'image/jpeg'
+  const id = messageId.replace(/[^\w-]/g, '')
+  const base = media.type === 'audio' ? `Audio-${id.slice(-10)}` : `soloone-${id}`
   const name = `${base}.${EXTENSIONS[mimeType]}`
   const localDir = path.join(config.stateDir, 'tmp')
-  const sourcePath = path.join(localDir, `${base}.source.${EXTENSIONS[sourceMime]}`)
+  const sourcePath = path.join(localDir, `${base}.source.${EXTENSIONS[sourceMime] || 'src'}`)
   const localPath = path.join(localDir, name)
 
   let response: Response
@@ -78,7 +89,8 @@ export async function prepareMedia(messageId: string, media: {
   await mkdir(localDir, { recursive: true })
   await writeFile(sourceMime === mimeType ? localPath : sourcePath, bytes)
   try {
-    if (sourceMime !== mimeType) await (media.type === 'video' ? toMp4 : toJpeg)(sourcePath, localPath)
+    if (media.type === 'audio') await toM4a(sourcePath, localPath, audioTitle(name))
+    else if (sourceMime !== mimeType) await (media.type === 'video' ? toMp4 : toJpeg)(sourcePath, localPath)
   } catch (error) {
     await rm(localPath, { force: true })
     await rm(sourcePath, { force: true })

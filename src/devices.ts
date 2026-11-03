@@ -21,6 +21,17 @@ export async function findDevice(phone: string): Promise<Device | undefined> {
   return raw.map(validate).find(device => device.phone === phone)
 }
 
+const detected = new Map<string, string>()
+
+// Contract: PGW-34 — without `whatsappPackage` in the registry the app is taken from what the phone has installed.
+export function rememberInstalledWhatsApp(phone: string, packages: string): void {
+  const installed = packages.split('\n').map(line => line.replace(/^package:/, '').trim())
+  const regular = installed.includes('com.whatsapp')
+  const business = installed.includes('com.whatsapp.w4b')
+  if (business && !regular) detected.set(phone, 'com.whatsapp.w4b')
+  else if (regular) detected.set(phone, 'com.whatsapp')
+}
+
 export function whatsappPackage(device: Device): string {
-  return device.whatsappPackage || 'com.whatsapp'
+  return device.whatsappPackage || detected.get(device.phone) || 'com.whatsapp'
 }

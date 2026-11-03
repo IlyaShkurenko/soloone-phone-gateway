@@ -1,7 +1,7 @@
 import { quote, screenshot, shell, sleep, topActivity } from './adb.js'
 import { config } from './config.js'
 import { SendFailure, SendUncertain } from './errors.js'
-import { discardPrepared, prepareMedia, stageMedia, type PreparedMedia, type StagedMedia } from './media.js'
+import { audioTitle, discardPrepared, prepareMedia, stageMedia, type PreparedMedia, type StagedMedia } from './media.js'
 import { recoverOnce, type RecoveryAction } from './recovery.js'
 import type { Script, Step } from './scripts.js'
 import { clearFocusedInput, typeText } from './typing.js'
@@ -14,7 +14,8 @@ export interface RunRequest {
   text?: string
   typingTimeMs?: number
   media?: {
-    type: 'image' | 'video'; url: string; fileName: string; mimeType?: string; caption?: string; viewOnce: boolean
+    // 'audio' covers voice notes too; WhatsApp gets them as an audio file (PGW-32).
+    type: 'image' | 'video' | 'audio'; url: string; fileName: string; mimeType?: string; caption?: string; viewOnce: boolean
     // Started before the phone connection so download and conversion overlap with it.
     prepared?: Promise<PreparedMedia>
   }
@@ -98,6 +99,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
   let deleted = false
   let deletedBefore = 0
   let edited = false
+  let audioBefore = 0
 
   // A UI snapshot stays valid for a few seconds while nothing is done on the phone (PGW-15).
   // Any action below clears it; checks after typing and after Send always read fresh.
@@ -170,7 +172,8 @@ export async function runScript(serial: string, script: Script, request: RunRequ
 
       switch (step.op) {
         case 'open_chat': {
-          if (request.media) throw new SendFailure('Text script used for media', false)
+          // Audio is attached from inside the chat (PGW-32); other media arrives through the share intent.
+          if (request.media && request.media.type !== 'audio') throw new SendFailure('Text script used for media', false)
           const notOnWhatsapp = step.notOnWhatsapp as Selector | undefined
           const retryDialog = step.retryDialog as Selector | undefined
           let nodes: UiNode[] = []
@@ -319,7 +322,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
         case 'check_recipient': {
           // Contract: PGW-9 — only the chat opened for `to`, or exactly one share recipient.
           const nodes = await read()
-          if (request.media) {
+          if (request.media && request.media.type !== 'audio') {
             const recipients = find(nodes, selectorParam(step, 'recipients'))
             if (!recipients) throw new SendFailure('Share recipient count is not visible', false)
           } else {
@@ -345,6 +348,64 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           sendPressed = true
           await tapNode(button)
           entry.note = 'Send pressed'
+          break
+        }
+        // Contract: PGW-32 — an audio file goes through the chat's own picker; "Share" drops audio silently.
+        case 'send_audio': {
+          if (request.media?.type !== 'audio') throw new SendFailure('Audio script used without audio', false)
+          if (Date.now() - options.startedAt > config.latestSendStartMs) throw new SendFailure('Too late to start sending safely', true)
+          const prepared = await (request.media.prepared ?? prepareMedia(request.messageId, request.media))
+          staged = await stageMedia(serial, prepared)
+          const title = audioTitle(prepared.name)
+          const audioMessage = selectorParam(step, 'audioMessage')
+          audioBefore = findAll(await read(true), audioMessage).length
+          await tapNode(await locate(index, step, selectorParam(step, 'attach'), entry))
+          await tapNode(await locate(index, step, selectorParam(step, 'document'), entry))
+          await tapNode(await locate(index, step, selectorParam(step, 'browseAudio'), entry))
+          // WhatsApp asks once for access to audio files; the dialog lives in the permission controller window.
+          let row: UiNode | undefined
+          for (const until = Date.now() + 15_000; !row && Date.now() < until;) {
+            const nodes = await act(dumpUi(serial, true))
+            const allow = find(nodes, selectorParam(step, 'allow'))
+            if (allow) await tapNode(allow)
+            else row = find(nodes, { text: title })
+            if (!row) await sleep(800)
+          }
+          if (!row) throw new SendFailure('The audio file is not in WhatsApp\'s audio list', true)
+          await tapNode(row)
+          await tapNode(await locate(index, step, selectorParam(step, 'pickerSend'), entry))
+          const nodes = await waitFor(selectorParam(step, 'dialogSend'), 8_000)
+          const question = find(nodes, { textContains: `Send "${title}" to` })
+          const cancel = find(nodes, selectorParam(step, 'dialogCancel'))
+          if (!question || !chatHeader || !question.text.includes(`to ${chatHeader}?`) || options.dryRun) {
+            if (cancel) await tapNode(cancel)
+            await run('input keyevent KEYCODE_BACK')
+            if (options.dryRun) {
+              entry.note = 'dry run stopped before Send'
+              return { outcome: 'stopped_before_send', trace }
+            }
+            throw new SendFailure('The audio confirmation does not name the opened chat', false)
+          }
+          const send = find(nodes, selectorParam(step, 'dialogSend'))!
+          await options.onSendPressed()
+          sendPressed = true
+          await tapNode(send)
+          entry.note = 'audio Send pressed'
+          break
+        }
+        case 'confirm_audio': {
+          const audioMessage = selectorParam(step, 'audioMessage')
+          const until = Math.min(options.startedAt + config.requestDeadlineMs, Date.now() + 60_000)
+          for (;;) {
+            const shown = findAll(await read(true), audioMessage)
+            const newest = shown.sort((a, b) => b.bounds[3] - a.bounds[3])[0]
+            if (shown.length > audioBefore && newest && !/pending/i.test(newest.desc)) {
+              entry.note = `audio message shown: ${newest.desc}`
+              break
+            }
+            if (Date.now() > until) throw new SendUncertain('Audio Send was pressed but the audio message was not confirmed')
+            await sleep(1500)
+          }
           break
         }
         case 'find_message': {

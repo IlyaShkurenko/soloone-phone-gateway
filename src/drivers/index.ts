@@ -1,10 +1,22 @@
 import { adb, shell } from '../adb.js'
-import type { Device } from '../devices.js'
+import { rememberInstalledWhatsApp, type Device } from '../devices.js'
 import { SendFailure } from '../errors.js'
 import { connectMultilogin, releaseMultilogin, stopMultilogin } from './multilogin.js'
 
 // A driver only provides a working ADB serial (PGW-4). Everything else is shared.
+const checkedPackages = new Set<string>()
+
 export async function connect(device: Device): Promise<string> {
+  const serial = await connectDevice(device)
+  if (!device.whatsappPackage && !checkedPackages.has(device.phone)) {
+    // Both apps installed keeps the regular one; the registry then has to name the right app.
+    rememberInstalledWhatsApp(device.phone, await shell(serial, 'pm list packages com.whatsapp'))
+    checkedPackages.add(device.phone)
+  }
+  return serial
+}
+
+async function connectDevice(device: Device): Promise<string> {
   if (device.driver === 'multilogin') return connectMultilogin(device.profileId)
 
   const serial = device.adbAddress
