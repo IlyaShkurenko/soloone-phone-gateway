@@ -137,3 +137,13 @@ test('a tick icon is classified by colour and width', () => {
   assert.equal(classifyTick(icon(50, 30, [140, 150, 155], 15, 35), 50).tick, 'sent')
   assert.equal(classifyTick(Buffer.alloc(50 * 30 * 3, 20), 50).tick, 'unknown')
 })
+
+const { mediaCaption } = await import('../src/incoming.js')
+
+// Contract: PGW-28
+test("WhatsApp's media placeholder is not a caption", () => {
+  assert.equal(mediaCaption('📷 Sent a photo'), undefined)
+  assert.equal(mediaCaption('📷 Photo'), undefined)
+  assert.equal(mediaCaption('🎤 Voice message (0:05)'), undefined)
+  assert.equal(mediaCaption('📷 Look at this'), 'Look at this')
+})

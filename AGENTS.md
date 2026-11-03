@@ -5,7 +5,7 @@ This service sends WhatsApp messages from Android phones (Multilogin cloud phone
 ## Context and scope
 
 - `docs/features/phone-gateway.md` holds the PGW-* contracts. The backend side is `soloone-backend/docs/features/phone-gateway-transport.md`.
-- The backend owns messages, the outgoing queue and incoming webhooks. This service only performs a send and reports `sent`, `failed` or `unknown`.
+- The backend owns messages, the outgoing queue and incoming webhooks. This service performs a send and reports `sent`, `failed` or `unknown`, and reports what a physical phone shows about incoming messages and ticks (workspace RFC-012, PGW-23 – PGW-30).
 - Device details stay here. Do not add Multilogin, ADB or device fields to the backend.
 
 ## Safety rules

@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto'
 import express, { type NextFunction, type Request, type Response } from 'express'
+import path from 'node:path'
 import { config } from './config.js'
 import { runOnDevice } from './device-queue.js'
 import { findDevice, whatsappPackage } from './devices.js'
@@ -7,7 +8,7 @@ import { connect, release } from './drivers/index.js'
 import { SendFailure, SendUncertain } from './errors.js'
 import { RunError, runScript, type RunRequest } from './executor.js'
 import { saveFailure } from './failures.js'
-import { captureBeforeOperation, chatCapture, startIncomingCapture } from './incoming.js'
+import { captureBeforeOperation, chatCapture, mediaSignature, startIncomingCapture } from './incoming.js'
 import { proposeFix } from './fixer.js'
 import { prepareMedia } from './media.js'
 import { startWatchdog } from './watchdog.js'
@@ -392,6 +393,14 @@ async function dryRun(req: Request, res: Response): Promise<void> {
 const app = express()
 app.use(express.json({ limit: '1mb' }))
 app.get('/health', (_req, res) => { res.json({ ok: true }) })
+// Contract: PGW-29 — signed instead of bearer-protected: the backend fetches incoming media with a plain GET.
+app.get('/v1/incoming-media/:name', (req, res) => {
+  const name = req.params.name
+  const sig = Buffer.from(String(req.query.sig || ''))
+  const expected = Buffer.from(mediaSignature(name))
+  if (!/^[\w.-]+$/.test(name) || sig.length !== expected.length || !timingSafeEqual(sig, expected)) return void res.status(404).end()
+  res.sendFile(path.join(config.stateDir, 'incoming', 'media', name), error => { if (error && !res.headersSent) res.status(404).end() })
+})
 app.use('/v1', (req, res, next) => authorized(req) ? next() : res.status(401).json({ error: 'Unauthorized' }))
 app.post('/v1/messages', (req, res, next) => { sendMessage(req, res).catch(next) })
 app.post('/v1/reactions', (req, res, next) => { sendReaction(req, res).catch(next) })

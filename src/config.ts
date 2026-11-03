@@ -41,6 +41,8 @@ export const config = {
     resendApiKey: process.env.RESEND_API_KEY?.trim() || '',
     from: process.env.ALERT_FROM?.trim() || 'SoloOne <support@solo1.ai>'
   },
+  // Incoming messages and ticks go to the backend here (PGW-28); empty keeps them on disk only.
+  backendEventsUrl: process.env.BACKEND_EVENTS_URL?.trim() || '',
   // A UI snapshot is reused this long when nothing was done on the phone; 0 disables the cache.
   uiSnapshotCacheMs: parseInt(process.env.UI_SNAPSHOT_CACHE_MS || '5000', 10),
   // Must stay below the backend's 150s request timeout (WA-PGW-4).

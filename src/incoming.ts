@@ -1,5 +1,6 @@
-// Contract: PGW-23–PGW-27 (RFC-012 phase 1) — record what the phone shows about incoming messages and
-// delivery ticks, without opening a chat. Records stay on disk for comparison with Whapi.
+// Contract: PGW-23–PGW-30 (RFC-012) — record what the phone shows about incoming messages and delivery
+// ticks, without opening a chat, and hand them to the backend when BACKEND_EVENTS_URL is set.
+import { createHash, createHmac } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -38,10 +39,13 @@ type MediaKind = 'image' | 'video' | 'voice' | 'audio' | 'document'
 
 interface PendingMedia { key: string; kind: MediaKind; time: number }
 
+interface BackendEvent { id: string; kind: 'message' | 'tick'; [field: string]: unknown }
+
 interface PhoneState {
+  names: Map<string, string>
   seen: Set<string>
   usedFiles: Set<string>
-  pending: PendingMedia[]
+  pending: Array<PendingMedia & { event: BackendEvent }>
   ticks: Map<string, string>
   lastOperationAt: number
   lastTicksAt: number
@@ -50,6 +54,17 @@ interface PhoneState {
 const states = new Map<string, PhoneState>()
 const dir = () => path.join(config.stateDir, 'incoming')
 const today = () => new Date().toISOString().slice(0, 10)
+const eventId = (key: string) => createHash('sha256').update(key).digest('hex').slice(0, 32)
+
+// Contract: PGW-29 — the backend downloads media with a plain GET, so the URL carries its own signature.
+export const mediaSignature = (name: string) => createHmac('sha256', config.token).update(name).digest('hex')
+
+// WhatsApp's own placeholder for a media message is not a caption (PGW-28).
+export function mediaCaption(text: string): string | undefined {
+  const rest = text.replace(/^(📷|🎥|📹|🎤|🎵|📄|📎)\s*/u, '').trim()
+  if (!rest || /^(sent an? )?(photo|video|voice message|audio|document|gif|sticker)( \(\d+:\d{2}\))?$/i.test(rest)) return undefined
+  return rest
+}
 
 // The dump is filtered on the phone: only WhatsApp records, and only the lines that carry messages,
 // so a poll costs about a kilobyte of mobile data instead of half a megabyte.
@@ -132,7 +147,7 @@ async function write(phone: string, record: Record<string, unknown>): Promise<vo
 async function loadState(phone: string): Promise<PhoneState> {
   const existing = states.get(phone)
   if (existing) return existing
-  const state: PhoneState = { seen: new Set(), usedFiles: new Set(), pending: [], ticks: new Map(), lastOperationAt: 0, lastTicksAt: 0 }
+  const state: PhoneState = { names: new Map(), seen: new Set(), usedFiles: new Set(), pending: [], ticks: new Map(), lastOperationAt: 0, lastTicksAt: 0 }
   const files = (await readdir(dir()).catch(() => [] as string[])).filter(name => name.endsWith('.jsonl')).sort().slice(-2)
   for (const name of files) {
     for (const line of (await readFile(path.join(dir(), name), 'utf8')).split('\n')) {
@@ -144,8 +159,56 @@ async function loadState(phone: string): Promise<PhoneState> {
       if (record.kind === 'tick' && record.chat && record.tick) state.ticks.set(record.chat, record.tick)
     }
   }
+  const names = await readFile(path.join(dir(), `names-${phone}.json`), 'utf8').then(JSON.parse).catch(() => ({})) as Record<string, string>
+  for (const [name, to] of Object.entries(names)) state.names.set(name, to)
   states.set(phone, state)
   return state
+}
+
+// Contract: PGW-28 — kept on disk until the backend accepts it; the event ID makes a resend harmless.
+let outbox: Array<{ phone: string; event: BackendEvent }> | undefined
+const outboxFile = () => path.join(dir(), 'outbox.json')
+
+async function loadOutbox() {
+  outbox ||= await readFile(outboxFile(), 'utf8').then(JSON.parse).catch(() => [])
+  return outbox!
+}
+
+async function enqueue(phone: string, event: BackendEvent): Promise<void> {
+  if (!config.backendEventsUrl) return
+  const queue = await loadOutbox()
+  queue.push({ phone, event })
+  await mkdir(dir(), { recursive: true })
+  await writeFile(outboxFile(), JSON.stringify(queue))
+}
+
+let flushing = false
+async function flushOutbox(): Promise<void> {
+  if (!config.backendEventsUrl || flushing) return
+  flushing = true
+  try {
+    const queue = await loadOutbox()
+    while (queue.length) {
+      const phone = queue[0].phone
+      const batch = queue.slice(0, 50).filter(item => item.phone === phone)
+      const response = await fetch(config.backendEventsUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.token}` },
+        body: JSON.stringify({ phone, events: batch.map(item => item.event) }),
+        signal: AbortSignal.timeout(60_000)
+      })
+      await response.body?.cancel()
+      if (!response.ok) throw new Error(`Backend returned ${response.status} for phone events`)
+      queue.splice(0, batch.length)
+      await writeFile(outboxFile(), JSON.stringify(queue))
+    }
+  } finally {
+    flushing = false
+  }
+}
+
+function messageEvent(key: string, chat: string, message: { sender?: string; text: string; time: number }): BackendEvent {
+  return { id: eventId(key), kind: 'message', chat, senderName: message.sender, text: message.text, time: message.time }
 }
 
 async function pollNotifications(device: PhysicalDevice, serial: string, state: PhoneState): Promise<void> {
@@ -156,7 +219,10 @@ async function pollNotifications(device: PhysicalDevice, serial: string, state: 
     state.seen.add(key)
     const kind = mediaKind(message)
     await write(device.phone, { kind: 'message', source: 'notification', key, ...message, ...(kind ? { media: kind } : {}) })
-    if (kind) state.pending.push({ key, kind, time: message.time })
+    const event = messageEvent(key, message.chat, message)
+    // A media message waits for its file so the backend gets both together.
+    if (kind) state.pending.push({ key, kind, time: message.time, event })
+    else await enqueue(device.phone, event)
   }
 }
 
@@ -180,14 +246,27 @@ async function collectMedia(device: PhysicalDevice, serial: string, state: Phone
       await mkdir(path.dirname(target), { recursive: true })
       await writeFile(target, await pull(serial, match.file))
       await write(device.phone, { kind: 'media', key: item.key, file: match.file, saved: path.basename(target), size: match.size })
+      const name = path.basename(target)
+      await enqueue(device.phone, { ...item.event, media: {
+        kind: item.kind, fileName: path.basename(match.file), mimeType: mimeOf(match.file), caption: mediaCaption(String(item.event.text)),
+        url: `http://127.0.0.1:${config.port}/v1/incoming-media/${encodeURIComponent(name)}?sig=${mediaSignature(name)}`
+      } })
     } else if (Date.now() > item.time + MEDIA_WAIT_MS) {
       await write(device.phone, { kind: 'media_missing', key: item.key, media: item.kind })
+      // Without the file the backend still learns that something arrived, as text.
+      await enqueue(device.phone, item.event)
     } else {
       continue
     }
     state.pending = state.pending.filter(pending => pending !== item)
   }
 }
+
+const MIME: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', mp4: 'video/mp4', '3gp': 'video/3gpp',
+  opus: 'audio/ogg', ogg: 'audio/ogg', m4a: 'audio/mp4', mp3: 'audio/mpeg', aac: 'audio/aac', pdf: 'application/pdf'
+}
+const mimeOf = (file: string) => MIME[path.extname(file).slice(1).toLowerCase()] || 'application/octet-stream'
 
 const inside = (node: UiNode, box: UiNode) => node.bounds[1] >= box.bounds[1] && node.bounds[3] <= box.bounds[3]
 
@@ -230,6 +309,12 @@ async function readTicks(device: PhysicalDevice, serial: string, state: PhoneSta
     if (state.ticks.get(name.text) === reading.tick) continue
     state.ticks.set(name.text, reading.tick)
     await write(device.phone, { kind: 'tick', chat: name.text, preview, date, ...reading })
+    // Contract: PGW-30 — a name is a phone number or the chat header seen when the gateway last opened that chat.
+    const digits = name.text.replace(/[\s()+-]/g, '')
+    const to = /^\d{7,15}$/.test(digits) ? digits : state.names.get(name.text)
+    if (to && (reading.tick === 'delivered' || reading.tick === 'read')) {
+      await enqueue(device.phone, { id: eventId(`t|${to}|${reading.tick}|${preview}|${Date.now()}`), kind: 'tick', to, tick: reading.tick, preview })
+    }
   }
 }
 
@@ -255,6 +340,12 @@ export function chatCapture(device: Device, to: string): (serial: string) => Pro
     const state = await loadState(physical.phone)
     state.lastOperationAt = Date.now()
     const nodes = await dumpUi(serial)
+    const header = find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text
+    if (header && state.names.get(header) !== to) {
+      state.names.set(header, to)
+      await mkdir(dir(), { recursive: true })
+      await writeFile(path.join(dir(), `names-${physical.phone}.json`), JSON.stringify(Object.fromEntries(state.names)))
+    }
     const statuses = findAll(nodes, { resourceId: 'com.whatsapp:id/status' })
     const dates = findAll(nodes, { resourceId: 'com.whatsapp:id/date' })
     const rowOf = (bubble: UiNode) => (node: UiNode) => node.bounds[1] >= bubble.bounds[1] - 20 && node.bounds[1] <= bubble.bounds[3] + 60
@@ -267,6 +358,8 @@ export function chatCapture(device: Device, to: string): (serial: string) => Pro
       if (state.seen.has(key)) continue
       state.seen.add(key)
       await write(physical.phone, { kind: 'message', source: 'chat', key, chat: to, text: bubble.text, timeLabel: label })
+      // The bubble arrived while the chat was open, so the capture time stands in for the minute label.
+      await enqueue(physical.phone, messageEvent(key, `${to}@s.whatsapp.net`, { text: bubble.text, time: Date.now() }))
     }
   }
 }
@@ -316,6 +409,9 @@ export function startIncomingCapture(): void {
         .finally(() => busy.delete(device.phone))
     }
   }
-  setInterval(() => { run().catch(error => log.warn({ err: error }, 'Incoming capture round failed')) }, POLL_EVERY_MS)
+  setInterval(() => {
+    run().catch(error => log.warn({ err: error }, 'Incoming capture round failed'))
+    flushOutbox().catch(error => log.warn({ err: error }, 'Phone events not delivered to the backend yet'))
+  }, POLL_EVERY_MS)
   setInterval(() => { prune().catch(() => undefined) }, 6 * 60 * 60 * 1000)
 }
