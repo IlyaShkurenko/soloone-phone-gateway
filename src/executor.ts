@@ -375,7 +375,8 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           await tapNode(row)
           await tapNode(await locate(index, step, selectorParam(step, 'pickerSend'), entry))
           const nodes = await waitFor(selectorParam(step, 'dialogSend'), 8_000)
-          const question = find(nodes, { textContains: `Send "${title}" to` })
+          // The dialog reads 'Send "<title>" to <chat>?'; the quote marks are not always plain ones.
+          const question = nodes.find(node => node.text.startsWith('Send ') && node.text.includes(title))
           const cancel = find(nodes, selectorParam(step, 'dialogCancel'))
           if (!question || !chatHeader || !question.text.includes(`to ${chatHeader}?`) || options.dryRun) {
             if (cancel) await tapNode(cancel)
