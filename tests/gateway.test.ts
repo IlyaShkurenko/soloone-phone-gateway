@@ -156,3 +156,24 @@ test('a contact shown by number gives its phone, a saved name does not', () => {
   assert.equal(phoneFromName('Mr Ill'), undefined)
   assert.equal(phoneFromName(undefined), undefined)
 })
+
+const { newChatBubbles } = await import('../src/incoming.js')
+
+// Contract: PGW-25
+test('customer bubbles after the bubble seen when the chat opened are new, also those above our reply', () => {
+  const anchor = { text: 'how much?', label: '21:10', own: false }
+  const bubbles = [
+    { text: 'hi', label: '21:09', own: false },
+    anchor,
+    { text: 'ok', label: '21:11', own: false },
+    { text: 'ok', label: '21:11', own: false },
+    { text: '£200 for 1 hour', label: '21:11', own: true },
+    { text: 'deal', label: '21:12', own: false }
+  ]
+  assert.deepEqual(newChatBubbles(anchor, bubbles, '£200 for 1 hour').map(item => item.key), ['21:11|ok', '21:11|ok|2', '21:12|deal'])
+  // Without the anchor on screen only the bubbles below our reply are taken.
+  assert.deepEqual(newChatBubbles({ ...anchor, text: 'scrolled away' }, bubbles, '£200 for 1 hour').map(item => item.key), ['21:12|deal'])
+  assert.deepEqual(newChatBubbles(undefined, bubbles, '£200 for 1 hour').map(item => item.key), ['21:12|deal'])
+  // Our text is not the newest own bubble: nothing is taken.
+  assert.deepEqual(newChatBubbles(anchor, bubbles, 'something else'), [])
+})

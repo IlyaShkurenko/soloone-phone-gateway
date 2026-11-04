@@ -64,8 +64,9 @@ export async function pull(serial: string, file: string): Promise<Buffer> {
   return withReconnect(args, () => run(args, 60_000, true) as Promise<Buffer>)
 }
 
+// Empty when no activity is resumed, as while the screen is off.
 export async function topActivity(serial: string): Promise<string> {
-  const output = await shell(serial, 'dumpsys activity activities | grep -m1 topResumedActivity')
+  const output = await shell(serial, 'dumpsys activity activities | grep -m1 topResumedActivity || true')
   return output.match(/\{[^}]*\s(\S+\/\S+)\s/)?.[1] || output.trim()
 }
 

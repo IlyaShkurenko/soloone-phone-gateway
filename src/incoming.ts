@@ -417,38 +417,77 @@ const sameText = (a: string, b: string) => {
   return plain(a) === plain(b)
 }
 
-// Contract: PGW-25 — after a text send, customer bubbles below the bubble we just sent arrived while the chat
-// was open. Other operations may leave the chat scrolled up, where older bubbles sit below ours, so they skip it.
-export function chatCapture(device: Device, to: string, sentText: string): (serial: string) => Promise<void> {
-  return async (serial: string) => {
-    const physical = capturing(device)
-    if (!physical) return
-    const state = await loadState(physical.phone)
-    state.lastOperationAt = Date.now()
-    const nodes = await dumpUi(serial)
-    const header = find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text
-    if (header && state.names.get(header) !== to) {
-      state.names.set(header, to)
-      await mkdir(dir(), { recursive: true })
-      await writeFile(path.join(dir(), `names-${physical.phone}.json`), JSON.stringify(Object.fromEntries(state.names)))
-    }
-    const statuses = findAll(nodes, { resourceId: 'com.whatsapp:id/status' })
-    const dates = findAll(nodes, { resourceId: 'com.whatsapp:id/date' })
-    const rowOf = (bubble: UiNode) => (node: UiNode) => node.bounds[1] >= bubble.bounds[1] - 20 && node.bounds[1] <= bubble.bounds[3] + 60
-    const bubbles = findAll(nodes, { resourceId: 'com.whatsapp:id/message_text' })
-    const own = bubbles.filter(bubble => statuses.some(rowOf(bubble))).sort((a, b) => b.bounds[3] - a.bounds[3])[0]
-    if (!own || !sameText(own.text, sentText)) return
-    const ownBottom = own.bounds[3]
-    for (const bubble of bubbles.filter(item => item.bounds[1] > ownBottom && !statuses.some(rowOf(item)))) {
-      const label = dates.find(rowOf(bubble))?.text || ''
-      const key = `c|${to}|${label}|${bubble.text}`
-      if (state.seen.has(key)) continue
-      state.seen.add(key)
-      await write(physical.phone, { kind: 'message', source: 'chat', key, chat: to, text: bubble.text, timeLabel: label })
-      // The bubble arrived while the chat was open, so the capture time stands in for the minute label.
-      await enqueue(physical.phone, messageEvent(key, `${to}@s.whatsapp.net`, { text: bubble.text, time: Date.now() }))
+// Contract: PGW-25 — after a text send, customer bubbles below the newest bubble seen when the chat opened arrived
+// while it was open, so they had no notification: also those that came in while our text was being typed.
+// Other operations may leave the chat scrolled up, where older bubbles sit below ours, so they skip it.
+export function chatCapture(device: Device, to: string, sentText: string): {
+  opened: (nodes: UiNode[]) => void
+  beforeLeave: (serial: string) => Promise<void>
+} {
+  let anchor: Bubble | undefined
+  return {
+    opened: nodes => { anchor = chatBubbles(nodes).at(-1) },
+    beforeLeave: async (serial: string) => {
+      const physical = capturing(device)
+      if (!physical) return
+      const state = await loadState(physical.phone)
+      state.lastOperationAt = Date.now()
+      const nodes = await dumpUi(serial)
+      const header = find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text
+      if (header && state.names.get(header) !== to) {
+        state.names.set(header, to)
+        await mkdir(dir(), { recursive: true })
+        await writeFile(path.join(dir(), `names-${physical.phone}.json`), JSON.stringify(Object.fromEntries(state.names)))
+      }
+      for (const { bubble, key: suffix } of newChatBubbles(anchor, chatBubbles(nodes), sentText)) {
+        const key = `c|${to}|${suffix}`
+        if (state.seen.has(key)) continue
+        state.seen.add(key)
+        await write(physical.phone, { kind: 'message', source: 'chat', key, chat: to, text: bubble.text, timeLabel: bubble.label })
+        // The bubble arrived while the chat was open, so the capture time stands in for the minute label.
+        await enqueue(physical.phone, messageEvent(key, `${to}@s.whatsapp.net`, { text: bubble.text, time: Date.now() }))
+      }
     }
   }
+}
+
+export interface Bubble { text: string; label: string; own: boolean }
+
+// Customer bubbles that came after `anchor`, with their key. When the anchor is gone from the screen, or the chat
+// showed nothing when it opened, only the bubbles below our sent one are taken, as they surely are new.
+export function newChatBubbles(anchor: Bubble | undefined, bubbles: Bubble[], sentText: string): Array<{ bubble: Bubble; key: string }> {
+  const ownIndex = lastIndex(bubbles, bubble => bubble.own)
+  if (ownIndex < 0 || !sameText(bubbles[ownIndex].text, sentText)) return []
+  // The anchor is the nearest bubble above ours that looks like it.
+  const anchorIndex = anchor
+    ? lastIndex(bubbles.slice(0, ownIndex), bubble => bubble.own === anchor.own && bubble.label === anchor.label && sameText(bubble.text, anchor.text))
+    : -1
+  const counts = new Map<string, number>()
+  const found: Array<{ bubble: Bubble; key: string }> = []
+  for (const bubble of bubbles.slice((anchorIndex >= 0 ? anchorIndex : ownIndex) + 1)) {
+    if (bubble.own) continue
+    const base = `${bubble.label}|${bubble.text}`
+    // Two equal bubbles in the same minute are two messages.
+    const count = (counts.get(base) || 0) + 1
+    counts.set(base, count)
+    found.push({ bubble, key: count > 1 ? `${base}|${count}` : base })
+  }
+  return found
+}
+
+function lastIndex<T>(items: T[], test: (item: T) => boolean): number {
+  for (let index = items.length - 1; index >= 0; index--) if (test(items[index])) return index
+  return -1
+}
+
+// Text bubbles from top to bottom; ours carry a delivery status icon in their row.
+export function chatBubbles(nodes: UiNode[]): Bubble[] {
+  const statuses = findAll(nodes, { resourceId: 'com.whatsapp:id/status' })
+  const dates = findAll(nodes, { resourceId: 'com.whatsapp:id/date' })
+  const rowOf = (bubble: UiNode) => (node: UiNode) => node.bounds[1] >= bubble.bounds[1] - 20 && node.bounds[1] <= bubble.bounds[3] + 60
+  return findAll(nodes, { resourceId: 'com.whatsapp:id/message_text' })
+    .sort((a, b) => a.bounds[1] - b.bounds[1])
+    .map(node => ({ text: node.text, label: dates.find(rowOf(node))?.text || '', own: statuses.some(rowOf(node)) }))
 }
 
 async function prune(): Promise<void> {

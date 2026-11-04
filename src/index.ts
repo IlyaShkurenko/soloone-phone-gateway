@@ -100,6 +100,7 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
     // Download and convert while the phone is being started or connected.
     const media = request.media ? { ...request.media, prepared: prepareMedia(request.messageId, request.media) } : undefined
     media?.prepared?.catch(() => undefined)
+    const capture = request.text && !request.media ? chatCapture(device, request.to, request.text) : undefined
     const result = await runOnDevice(device.phone, async () => {
       const serial = await connect(device)
       await captureBeforeOperation(device, serial)
@@ -107,7 +108,7 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
         return await runScript(serial, activeScript, { ...request, media, pkg: whatsappPackage(device) }, {
           startedAt,
           onSendPressed: () => ledger.markSendPressed(request.messageId),
-          ...(request.text && !request.media ? { beforeLeave: chatCapture(device, request.to, request.text) } : {})
+          ...(capture ? { onChatOpened: capture.opened, beforeLeave: capture.beforeLeave } : {})
         })
       } finally {
         release(device, serial)

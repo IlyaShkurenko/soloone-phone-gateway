@@ -33,6 +33,8 @@ export interface RunOptions {
   dryRun?: boolean
   startedAt: number
   onSendPressed: () => Promise<void>
+  // Gets the screen of the chat just opened, before anything is typed (PGW-25).
+  onChatOpened?: (nodes: UiNode[]) => void
   // Runs before the chat is left, while it is still on screen (PGW-25).
   beforeLeave?: (serial: string) => Promise<void>
 }
@@ -193,6 +195,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           await locate(index, step, step.target!, entry)
           chatHeader = find(await read(), selectorParam(step, 'header'))?.text || ''
           if (!chatHeader) throw new SendFailure('Chat header is not readable', false)
+          options.onChatOpened?.(await read())
           entry.note = 'chat opened'
           break
         }
@@ -344,6 +347,8 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           }
           if (Date.now() - options.startedAt > config.latestSendStartMs) throw new SendFailure('Too late to start sending safely', true)
           const button = await locate(index, step, step.target!, entry)
+          // Preparing a video can take longer than the screen timeout of a phone on battery.
+          await run('input keyevent KEYCODE_WAKEUP')
           await options.onSendPressed()
           sendPressed = true
           await tapNode(button)
@@ -580,6 +585,8 @@ async function confirmSent(serial: string, step: Step, request: RunRequest, dead
   while (Date.now() < until) {
     const nodes = await dumpUi(serial)
     const activity = await topActivity(serial)
+    // Contract: PGW-13 — a phone that fell asleep after Send is woken and the bubble is still awaited.
+    if (!activity) await shell(serial, 'input keyevent KEYCODE_WAKEUP')
     if (activity.includes(String(step.activity || 'Conversation'))) {
       if (request.media) {
         // A media upload can stall on the cloud phone: WhatsApp shows "Pending", then a "Retry" bubble.
