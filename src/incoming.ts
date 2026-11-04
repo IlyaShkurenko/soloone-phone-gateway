@@ -184,6 +184,9 @@ async function enqueue(phone: string, event: BackendEvent): Promise<void> {
   queue.push({ phone, event })
   await mkdir(dir(), { recursive: true })
   await writeFile(outboxFile(), JSON.stringify(queue))
+  // Sent at once while the backend answers; after a failure the 15-second round retries, so a backend
+  // outage cannot reach the parking limit (PGW-28) in seconds.
+  if (!failures) void flushOutbox().catch(error => log.warn({ err: error }, 'Phone events not delivered to the backend yet'))
 }
 
 const PARK_AFTER_FAILURES = 10
