@@ -14,7 +14,7 @@ function run(args: string[], timeoutMs: number, binary = false): Promise<Buffer 
     }, (error, stdout, stderr) => {
       if (error) {
         const detail = (stderr?.toString() || stdout?.toString() || error.message).trim()
-        reject(new Error(`adb ${args.slice(0, 4).join(' ')} failed: ${detail.slice(0, 300)}`))
+        reject(new Error(`adb ${args.slice(0, 4).join(' ')} failed: ${error.killed ? 'timed out' : detail.slice(0, 300)}`))
         return
       }
       resolve(stdout)
@@ -24,16 +24,21 @@ function run(args: string[], timeoutMs: number, binary = false): Promise<Buffer 
 
 const DROPPED = /device offline|device '[^']*' not found|connection reset|closed|protocol fault/i
 
-// Contract: PGW-17 — a dropped TCP ADB link (VPN hiccup) is reconnected once and the command retried.
+// Contract: PGW-17 — a dropped TCP ADB link (VPN hiccup) is reconnected once and the command retried; a timed-out one is reconnected only.
 async function withReconnect<T>(args: string[], attempt: () => Promise<T>): Promise<T> {
   try {
     return await attempt()
   } catch (error) {
     const serialIndex = args.indexOf('-s')
     const serial = serialIndex >= 0 ? args[serialIndex + 1] : undefined
-    if (!serial || !serial.includes(':') || !DROPPED.test(error instanceof Error ? error.message : String(error))) throw error
+    const message = error instanceof Error ? error.message : String(error)
+    const timedOut = message.endsWith('failed: timed out')
+    if (!serial || !serial.includes(':') || (!timedOut && !DROPPED.test(message))) throw error
     await run(['disconnect', serial], 10_000).catch(() => undefined)
     await run(['connect', serial], 15_000)
+    // A hung link (phone slept, VPN came back) still lists as "device" and every command just times out. The link is
+    // renewed, but the command is not run again: a tap or a send may have reached the phone before the timeout.
+    if (timedOut) throw error
     await sleep(1500)
     return attempt()
   }
