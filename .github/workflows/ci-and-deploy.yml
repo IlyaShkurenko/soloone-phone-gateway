@@ -35,7 +35,9 @@ jobs:
             source ~/.nvm/nvm.sh
             nvm use 22.13.1
             cd /opt/soloone-phone-gateway
-            git pull
+            # Always main: a branch left on the server for a test is replaced by main here.
+            git fetch origin main
+            git checkout -B main origin/main
             npm ci
             npm run build
             # Do not restart while a message is being sent on a phone.
