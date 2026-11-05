@@ -27,6 +27,7 @@ interface MessageBody {
   to?: unknown
   text?: unknown
   typingTimeMs?: unknown
+  quote?: { text?: unknown; sentAt?: unknown }
   media?: {
     type?: unknown; url?: unknown; fileName?: unknown; mimeType?: unknown
     caption?: unknown; viewOnce?: unknown; voice?: unknown
@@ -65,6 +66,8 @@ function parseBody(body: MessageBody): { from: string; request: Omit<RunRequest,
   if (typeof body.text !== 'string' || !body.text.trim()) return 'text is required'
   return { from: body.from, request: {
     ...base, text: body.text,
+    ...(typeof body.quote?.text === 'string' && body.quote.text.trim()
+      ? { quote: { text: body.quote.text, ...(typeof body.quote.sentAt === 'string' ? { sentAt: body.quote.sentAt } : {}) } } : {}),
     typingTimeMs: typeof body.typingTimeMs === 'number' ? Math.max(500, Math.min(30_000, body.typingTimeMs)) : undefined
   } }
 }

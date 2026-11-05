@@ -26,6 +26,8 @@ export interface RunRequest {
   deletion?: BubbleTarget
   // One of our own text messages to change to `text` (PGW-22).
   edit?: BubbleTarget
+  // The customer message a text answers, quoted when it can be found (PGW-41).
+  quote?: BubbleTarget
 }
 
 export interface BubbleTarget { text?: string; mediaType?: 'image' | 'video'; sentAt?: string }
@@ -457,6 +459,38 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           }
           break
         }
+        case 'quote_message': {
+          // Contract: PGW-41 — a quote that cannot be set up is left out: the reply still goes, without it.
+          if (!request.quote?.text) {
+            entry.note = 'no quote'
+            break
+          }
+          const target = await findTargetBubble(serial, step, request.quote)
+          if (!target) {
+            entry.note = 'quoted message not visible; sending without the quote'
+            break
+          }
+          await act(longPress(serial, target))
+          await sleep(1000)
+          const reply = find(await act(dumpUi(serial, true)), selectorParam(step, 'reply'))
+          if (!reply) {
+            await run('input keyevent KEYCODE_BACK')
+            entry.note = 'no Reply action; sending without the quote'
+            break
+          }
+          await tapNode(reply)
+          await sleep(900)
+          const nodes = await read(true)
+          const quoted = find(nodes, selectorParam(step, 'quoted'))
+          if (!quoted || !sameQuote(quoted.text, request.quote.text)) {
+            const cancel = find(nodes, selectorParam(step, 'cancel'))
+            if (cancel) await tapNode(cancel)
+            entry.note = 'quote not confirmed; sending without it'
+            break
+          }
+          entry.note = 'quote set'
+          break
+        }
         case 'find_message': {
           const target = request.reaction || request.deletion || request.edit
           if (!target) throw new SendFailure('Script used without a target message', false)
@@ -704,6 +738,14 @@ function phoneTimeLabel(iso: string, timeZone: string): string | undefined {
 
 // Rows keep the time label and ticks a little below the bubble content.
 const sameRow = (node: UiNode, bubble: UiNode) => node.bounds[1] >= bubble.bounds[1] - 20 && node.bounds[1] <= bubble.bounds[3] + 160
+
+// The quote preview shows the start of a long message, cut with an ellipsis.
+function sameQuote(shown: string, quoted: string): boolean {
+  const plain = (value: string) => normalize(value.replace(/[*_~`]/g, ''))
+  const preview = plain(shown).replace(/(…|\.\.\.)$/, '').trim()
+  const full = plain(quoted)
+  return preview.length > 0 && (preview === full || (full.startsWith(preview) && preview.length >= Math.min(20, full.length)))
+}
 
 function bubbleCandidates(nodes: UiNode[], step: Step, target: BubbleTarget): UiNode[] {
   const kind = target.mediaType === 'video' ? /video/i : /photo/i

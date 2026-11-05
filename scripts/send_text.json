@@ -18,6 +18,16 @@
       "emptyText": "Message"
     },
     {
+      "op": "quote_message",
+      "goal": "Reply to the customer message this text answers",
+      "textBubble": { "resourceId": "com.whatsapp:id/message_text" },
+      "date": { "resourceId": "com.whatsapp:id/date" },
+      "maxScrolls": 2,
+      "reply": { "desc": "Reply" },
+      "quoted": { "resourceId": "com.whatsapp:id/quoted_text" },
+      "cancel": { "resourceId": "com.whatsapp:id/quoted_preview_cancel" }
+    },
+    {
       "op": "type_text",
       "goal": "Type the message into the message input",
       "target": { "resourceId": "com.whatsapp:id/entry" }
