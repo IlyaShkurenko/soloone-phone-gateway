@@ -1,6 +1,7 @@
 import { quote, screenshot, shell, sleep, topActivity } from './adb.js'
 import { config } from './config.js'
 import { SendFailure, SendUncertain } from './errors.js'
+import { fastUiEnabled } from './fast-ui.js'
 import { audioTitle, discardPrepared, prepareMedia, stageMedia, type PreparedMedia, type StagedMedia } from './media.js'
 import { recoverOnce, type RecoveryAction } from './recovery.js'
 import type { Script, Step } from './scripts.js'
@@ -359,7 +360,19 @@ export async function runScript(serial: string, script: Script, request: RunRequ
             return { outcome: 'stopped_before_send', trace }
           }
           if (Date.now() - options.startedAt > config.latestSendStartMs) throw new SendFailure('Too late to start sending safely', true)
-          const button = await locate(index, step, step.target!, entry)
+          let button = await locate(index, step, step.target!, entry)
+          // Contract: PGW-15 — a fast read can catch the keyboard still sliding in after typing; a tap at the
+          // stale Send position then lands on its Enter key. Send is tapped only once its position holds.
+          if (fastUiEnabled(serial)) {
+            for (let check = 0; check < 6; check++) {
+              await sleep(300)
+              cached = null
+              const again = await locate(index, step, step.target!, entry)
+              const moved = again.bounds.some((value, i) => value !== button.bounds[i])
+              button = again
+              if (!moved) break
+            }
+          }
           // Preparing a video can take longer than the screen timeout of a phone on battery.
           await run('input keyevent KEYCODE_WAKEUP')
           await options.onSendPressed()
