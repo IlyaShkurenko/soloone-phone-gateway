@@ -6,6 +6,7 @@ import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:
 import path from 'node:path'
 import { pull, quote, screenshot, shell, sleep } from './adb.js'
 import { config } from './config.js'
+import { EventQueue } from './event-queue.js'
 import { LEAVE_SCREEN_AS_IS, runOnDevice } from './device-queue.js'
 import { whatsappPackage, type Device } from './devices.js'
 import { connect } from './drivers/index.js'
@@ -169,60 +170,57 @@ async function loadState(phone: string): Promise<PhoneState> {
   return state
 }
 
-// Contract: PGW-28 — kept on disk until the backend accepts it; the event ID makes a resend harmless.
-let outbox: Array<{ phone: string; event: BackendEvent }> | undefined
-const outboxFile = () => path.join(dir(), 'outbox.json')
-
-async function loadOutbox() {
-  outbox ||= await readFile(outboxFile(), 'utf8').then(JSON.parse).catch(() => [])
-  return outbox!
+// Contract: PGW-28, PGW-40 — kept in a SQLite table until the backend accepts it; the event ID makes a resend harmless.
+let queue: EventQueue | undefined
+function events(): EventQueue {
+  if (!queue) {
+    queue = new EventQueue(path.join(dir(), 'events.sqlite'))
+    const imported = queue.importLegacy(path.join(dir(), 'outbox.json'))
+    if (imported) log.info({ imported }, 'Earlier phone event outbox imported')
+  }
+  return queue
 }
 
 async function enqueue(phone: string, event: BackendEvent): Promise<void> {
   if (!config.backendEventsUrl) return
-  const queue = await loadOutbox()
-  queue.push({ phone, event })
-  await mkdir(dir(), { recursive: true })
-  await writeFile(outboxFile(), JSON.stringify(queue))
-  // Sent at once while the backend answers; after a failure the 15-second round retries, so a backend
-  // outage cannot reach the parking limit (PGW-28) in seconds.
-  if (!failures) void flushOutbox().catch(error => log.warn({ err: error }, 'Phone events not delivered to the backend yet'))
+  events().add(phone, event)
+  // Sent at once while the backend answers; a later failure waits its pause, and the 15-second round picks it up.
+  void flushOutbox().catch(error => log.warn({ err: error }, 'Phone events not delivered to the backend yet'))
 }
 
-const PARK_AFTER_FAILURES = 10
+// 400 and 422 mean the backend rejects these events; anything else (a network error, a 5xx, a wrong token,
+// a deploy in progress) is the backend being unavailable, which never sets an event aside.
+const isRefusal = (status: number) => status === 400 || status === 422
+
 let flushing = false
-let failures = 0
 async function flushOutbox(): Promise<void> {
   if (!config.backendEventsUrl || flushing) return
   flushing = true
   try {
-    const queue = await loadOutbox()
-    // Contract: PGW-28 — after a failure events go one by one, and one the backend keeps refusing is set
-    // aside in parked.json so it cannot hold back every later message of that phone.
-    if (failures >= PARK_AFTER_FAILURES && queue.length) {
-      const parked = queue.shift()!
-      await appendFile(path.join(dir(), 'parked.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), ...parked })}\n`)
-      await writeFile(outboxFile(), JSON.stringify(queue))
-      log.warn({ phone: parked.phone, eventId: parked.event.id, kind: parked.event.kind }, 'Phone event set aside after repeated backend failures')
-      failures = 0
-    }
-    while (queue.length) {
-      const phone = queue[0].phone
-      const batch = queue.slice(0, failures ? 1 : 50).filter(item => item.phone === phone)
-      const response = await fetch(config.backendEventsUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.token}` },
-        body: JSON.stringify({ phone, events: batch.map(item => item.event) }),
-        signal: AbortSignal.timeout(60_000)
-      })
-      await response.body?.cancel()
-      if (!response.ok) {
-        failures++
-        throw new Error(`Backend returned ${response.status} for phone events`)
+    for (let batch = events().next(); batch; batch = events().next()) {
+      const ids = batch.events.map(event => event.id)
+      let status: number
+      try {
+        const response = await fetch(config.backendEventsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.token}` },
+          body: JSON.stringify({ phone: batch.phone, events: batch.events }),
+          signal: AbortSignal.timeout(60_000)
+        })
+        await response.body?.cancel()
+        status = response.status
+      } catch (error) {
+        events().failed(ids, error instanceof Error ? error.message : String(error), false)
+        throw error
       }
-      failures = 0
-      queue.splice(0, batch.length)
-      await writeFile(outboxFile(), JSON.stringify(queue))
+      if (status >= 200 && status < 300) {
+        events().sent(ids)
+        continue
+      }
+      for (const id of events().failed(ids, `HTTP ${status}`, isRefusal(status))) {
+        log.warn({ phone: batch.phone, eventId: id, status }, 'Phone event set aside after repeated backend refusals')
+      }
+      if (!isRefusal(status)) throw new Error(`Backend returned ${status} for phone events`)
     }
   } finally {
     flushing = false
@@ -502,6 +500,7 @@ export function chatBubbles(nodes: UiNode[]): Bubble[] {
 
 async function prune(): Promise<void> {
   const cutoff = Date.now() - KEEP_DAYS * 24 * 60 * 60 * 1000
+  events().prune(KEEP_DAYS * 24 * 60 * 60 * 1000)
   for (const folder of [dir(), path.join(dir(), 'media')]) {
     for (const name of await readdir(folder).catch(() => [] as string[])) {
       const file = path.join(folder, name)
