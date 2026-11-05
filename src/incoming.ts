@@ -15,7 +15,7 @@ import { dumpUi, find, findAll, tap, type UiNode } from './ui.js'
 
 type PhysicalDevice = Extract<Device, { driver: 'physical' }>
 
-const POLL_EVERY_MS = 15_000
+const POLL_EVERY_MS = 5_000
 const TICKS_EVERY_MS = 2 * 60 * 1000
 const KEEP_DAYS = 14
 const MEDIA_BEFORE_MS = 5_000
@@ -184,7 +184,7 @@ function events(): EventQueue {
 async function enqueue(phone: string, event: BackendEvent): Promise<void> {
   if (!config.backendEventsUrl) return
   events().add(phone, event)
-  // Sent at once while the backend answers; a later failure waits its pause, and the 15-second round picks it up.
+  // Sent at once while the backend answers; a later failure waits its pause, and the 5-second round picks it up.
   void flushOutbox().catch(error => log.warn({ err: error }, 'Phone events not delivered to the backend yet'))
 }
 

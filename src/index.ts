@@ -114,7 +114,7 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
       const serial = await connect(device)
       timing.connectMs = Date.now() - startedAt - timing.queuedMs
       // Between the parts of one reply the chat is still open (PGW-37): its own messages raise no notification
-      // and are read from the chat on leaving, and the 15-second round keeps polling the others.
+      // and are read from the chat on leaving, and the 5-second round keeps polling the others.
       if (!kept) await captureBeforeOperation(device, serial)
       timing.captureMs = Date.now() - startedAt - timing.queuedMs - timing.connectMs
       // Contract: PGW-37 — the next part of a reply to the same chat is typed into the chat the last one left open.
