@@ -11,11 +11,13 @@ import { LEAVE_SCREEN_AS_IS, runOnDevice } from './device-queue.js'
 import { whatsappPackage, type Device } from './devices.js'
 import { connect } from './drivers/index.js'
 import { log } from './logger.js'
+import { watchNotifications } from './notification-watch.js'
 import { dumpUi, find, findAll, tap, type UiNode } from './ui.js'
 
 type PhysicalDevice = Extract<Device, { driver: 'physical' }>
 
-const POLL_EVERY_MS = 5_000
+// With the notification stream (PGW-42) the poll is the fallback for a stream that died unnoticed.
+const POLL_EVERY_MS = 15_000
 const TICKS_EVERY_MS = 2 * 60 * 1000
 const KEEP_DAYS = 14
 const MEDIA_BEFORE_MS = 5_000
@@ -548,24 +550,42 @@ async function tick(device: PhysicalDevice): Promise<void> {
 
 export function startIncomingCapture(): void {
   const busy = new Set<string>()
+  // A notification that arrives while a round is running gets a round of its own right after.
+  const again = new Set<string>()
   const offline = new Set<string>()
+  const watched = new Set<string>()
+  const capture = (device: PhysicalDevice) => {
+    // A slow round must not stack up behind itself.
+    if (busy.has(device.phone)) {
+      again.add(device.phone)
+      return
+    }
+    busy.add(device.phone)
+    tick(device)
+      .then(() => offline.delete(device.phone))
+      .catch(error => {
+        // An offline phone is reported by the watchdog (PGW-18); log the first miss only.
+        if (!offline.has(device.phone)) log.warn({ err: error, phone: device.phone }, 'Incoming capture failed')
+        offline.add(device.phone)
+      })
+      .finally(() => {
+        busy.delete(device.phone)
+        if (again.delete(device.phone)) capture(device)
+      })
+  }
   const run = async () => {
     const devices = (JSON.parse(await readFile(config.devicesFile, 'utf8')) as Device[])
       .filter((device): device is PhysicalDevice => device.driver === 'physical' && device.captureIncoming !== false)
     for (const device of devices) {
-      // A slow round must not stack up behind itself.
-      if (busy.has(device.phone)) continue
-      busy.add(device.phone)
-      tick(device)
-        .then(() => offline.delete(device.phone))
-        .catch(error => {
-          // An offline phone is reported by the watchdog (PGW-18); log the first miss only.
-          if (!offline.has(device.phone)) log.warn({ err: error, phone: device.phone }, 'Incoming capture failed')
-          offline.add(device.phone)
-        })
-        .finally(() => busy.delete(device.phone))
+      // Contract: PGW-42 — a WhatsApp notification on the phone starts a capture at once.
+      if (!watched.has(device.phone)) {
+        watched.add(device.phone)
+        watchNotifications(device.adbAddress, () => capture(device))
+      }
+      capture(device)
     }
   }
+  void run().catch(error => log.warn({ err: error }, 'Incoming capture round failed'))
   setInterval(() => {
     run().catch(error => log.warn({ err: error }, 'Incoming capture round failed'))
     flushOutbox().catch(error => log.warn({ err: error }, 'Phone events not delivered to the backend yet'))

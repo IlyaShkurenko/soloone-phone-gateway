@@ -186,3 +186,13 @@ test('a profile read takes the customer bubbles after the one seen when the chat
   // The anchor is not on screen: nothing is taken rather than recorded twice.
   assert.deepEqual(newChatBubbles(undefined, bubbles, ''), [])
 })
+
+const { isWhatsAppNotify } = await import('../src/notification-watch.js')
+
+// Contract: PGW-42
+test('only a WhatsApp notify line in the phone log starts a capture', () => {
+  assert.equal(isWhatsAppNotify('I/NotificationManager(31575): com.whatsapp.w4b: notify(1, null, Notification(channel=individual_chat_defaults_2 shortcut=59945580015643@lid'), true)
+  assert.equal(isWhatsAppNotify('I/NotificationManager( 9120): com.whatsapp: notify(1, Abc, Notification(channel=individual_chat_defaults_5'), true)
+  assert.equal(isWhatsAppNotify('I/NotificationManager( 2201): com.google.android.gms: notify(4, null, Notification(channel=Fido'), false)
+  assert.equal(isWhatsAppNotify('D/EdgeLightingManager( 1664): showForNotification : packageName = com.whatsapp.w4b'), false)
+})
