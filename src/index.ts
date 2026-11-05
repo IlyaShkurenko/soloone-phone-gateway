@@ -8,7 +8,7 @@ import { connect, release } from './drivers/index.js'
 import { SendFailure, SendUncertain } from './errors.js'
 import { RunError, runScript, type RunRequest } from './executor.js'
 import { saveFailure } from './failures.js'
-import { captureBeforeOperation, chatCapture, mediaSignature, reportOutgoing, startIncomingCapture, type Bubble } from './incoming.js'
+import { captureBeforeOperation, chatCapture, mediaSignature, recheckAfterLeave, reportOutgoing, startIncomingCapture, type Bubble } from './incoming.js'
 import { proposeFix } from './fixer.js'
 import { prepareMedia } from './media.js'
 import { startWatchdog } from './watchdog.js'
@@ -142,7 +142,12 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
             } finally {
               release(device, leaving)
             }
+            // Contract: PGW-43
+            recheckAfterLeave(device, request.to, run.chatHeader ?? '', capture.last())
           }, CHAT_HOLD_MS)
+        } else if (capture && run.chatHeader) {
+          // Contract: PGW-43 — the run left the chat; a message that came in that moment is looked for.
+          recheckAfterLeave(device, request.to, run.chatHeader, capture.last())
         }
         return run
       } finally {

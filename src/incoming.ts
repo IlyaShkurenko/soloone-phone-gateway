@@ -9,7 +9,7 @@ import { config } from './config.js'
 import { EventQueue } from './event-queue.js'
 import { LEAVE_SCREEN_AS_IS, runOnDevice } from './device-queue.js'
 import { whatsappPackage, type Device } from './devices.js'
-import { connect } from './drivers/index.js'
+import { connect, release } from './drivers/index.js'
 import { log } from './logger.js'
 import { watchNotifications } from './notification-watch.js'
 import { dumpUi, find, findAll, tap, type UiNode } from './ui.js'
@@ -17,7 +17,7 @@ import { dumpUi, find, findAll, tap, type UiNode } from './ui.js'
 type PhysicalDevice = Extract<Device, { driver: 'physical' }>
 
 // With the notification stream (PGW-42) the poll is the fallback for a stream that died unnoticed.
-const POLL_EVERY_MS = 15_000
+const POLL_EVERY_MS = 5_000
 const TICKS_EVERY_MS = 2 * 60 * 1000
 const KEEP_DAYS = 14
 const MEDIA_BEFORE_MS = 5_000
@@ -54,6 +54,9 @@ interface PhoneState {
   ticks: Map<string, string>
   lastOperationAt: number
   lastTicksAt: number
+  // `${phone}|${text}` of customer messages recorded lately, from a notification or a chat: the same message
+  // found again by the other way is not recorded twice (PGW-43).
+  recent: Map<string, number>
 }
 
 const states = new Map<string, PhoneState>()
@@ -152,7 +155,7 @@ async function write(phone: string, record: Record<string, unknown>): Promise<vo
 async function loadState(phone: string): Promise<PhoneState> {
   const existing = states.get(phone)
   if (existing) return existing
-  const state: PhoneState = { names: new Map(), profiled: new Set(), profileQueue: [], seen: new Set(), usedFiles: new Set(), pending: [], ticks: new Map(), lastOperationAt: 0, lastTicksAt: 0 }
+  const state: PhoneState = { names: new Map(), profiled: new Set(), profileQueue: [], seen: new Set(), usedFiles: new Set(), pending: [], ticks: new Map(), lastOperationAt: 0, lastTicksAt: 0, recent: new Map() }
   const files = (await readdir(dir()).catch(() => [] as string[])).filter(name => name.endsWith('.jsonl')).sort().slice(-2)
   for (const name of files) {
     for (const line of (await readFile(path.join(dir(), name), 'utf8')).split('\n')) {
@@ -257,6 +260,8 @@ async function pollNotifications(device: PhysicalDevice, serial: string, state: 
       continue
     }
     const kind = mediaKind(message)
+    const from = phoneFromName(message.sender) || (message.sender ? state.names.get(message.sender) : undefined)
+    if (from) remember(state, from, message.text)
     await write(device.phone, { kind: 'message', source: 'notification', key, ...message, ...(kind ? { media: kind } : {}) })
     const event = messageEvent(key, message.chat, message)
     // Contract: PGW-35 — a sender the phone shows only by number gets its WhatsApp profile name read once.
@@ -468,12 +473,71 @@ export function chatCapture(device: Device, to: string, sentText: string, startA
         const key = `c|${to}|${suffix}`
         if (state.seen.has(key)) continue
         state.seen.add(key)
+        if (recorded(state, to, bubble.text)) continue
+        remember(state, to, bubble.text)
         await write(physical.phone, { kind: 'message', source: 'chat', key, chat: to, text: bubble.text, timeLabel: bubble.label })
         // The bubble arrived while the chat was open, so the capture time stands in for the minute label.
         await enqueue(physical.phone, messageEvent(key, `${to}@s.whatsapp.net`, { text: bubble.text, time: Date.now() }))
       }
     }
   }
+}
+
+const RECENT_MS = 3 * 60 * 1000
+const recentKey = (to: string, text: string) => `${to}|${text.replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim()}`
+function remember(state: PhoneState, to: string, text: string): void {
+  const now = Date.now()
+  state.recent.set(recentKey(to, text), now)
+  for (const [key, at] of state.recent) if (now - at > RECENT_MS) state.recent.delete(key)
+}
+function recorded(state: PhoneState, to: string, text: string): boolean {
+  const at = state.recent.get(recentKey(to, text))
+  return at !== undefined && Date.now() - at <= RECENT_MS
+}
+
+// Contract: PGW-43 — a message that reaches the chat in the moment the gateway leaves it gets no notification.
+// A few seconds after leaving, the chat list is read once: an unread badge on that chat means such a message,
+// and the chat is opened to read the customer bubbles below the one last seen there.
+const RECHECK_AFTER_MS = 3000
+// One pending recheck per chat: the parts of one reply sent in a row are rechecked once, after the last.
+const rechecks = new Map<string, NodeJS.Timeout>()
+export function recheckAfterLeave(device: Device, to: string, header: string, anchor: Bubble | undefined): void {
+  const physical = capturing(device)
+  if (!physical || !header) return
+  const chatKey = `${physical.phone}|${to}`
+  clearTimeout(rechecks.get(chatKey))
+  rechecks.set(chatKey, setTimeout(() => {
+    rechecks.delete(chatKey)
+    void runOnDevice(physical.phone, async () => {
+      const serial = await connect(physical)
+      const state = await loadState(physical.phone)
+      await pollNotifications(physical, serial, state).catch(() => undefined)
+      const pkg = whatsappPackage(physical)
+      try {
+        await shell(serial, `input keyevent KEYCODE_WAKEUP; am start -W -f 0x10008000 -n ${pkg}/com.whatsapp.Main >/dev/null`, 30_000)
+        await sleep(1200)
+        const nodes = await dumpUi(serial)
+        const row = findAll(nodes, { resourceId: 'com.whatsapp:id/contact_row_container' })
+          .find(item => nodes.some(node => node.resourceId === 'com.whatsapp:id/conversations_row_contact_name' && node.text === header && inside(node, item)))
+        const unread = row && nodes.find(node => node.resourceId === 'com.whatsapp:id/conversations_row_message_count' && inside(node, row))
+        if (!unread || !row) return
+        // Unread but already recorded from its notification: nothing was missed, and opening the chat would mark it read.
+        const preview = nodes.find(node => node.resourceId === 'com.whatsapp:id/single_msg_tv' && inside(node, row))?.text
+        if (preview && recorded(state, to, preview)) return
+        await shell(serial, `am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${to}`)} -p ${quote(pkg)} >/dev/null`)
+        for (const until = Date.now() + 10_000; Date.now() < until; await sleep(700)) {
+          if (find(await dumpUi(serial), { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text === header) break
+        }
+        await chatCapture(physical, to, '', anchor).beforeLeave(serial)
+        log.info({ phone: physical.phone, to }, 'A message that arrived as the chat was left was read from the chat')
+      } finally {
+        state.lastOperationAt = Date.now()
+        await shell(serial, 'input keyevent KEYCODE_HOME').catch(() => undefined)
+        release(physical, serial)
+      }
+    }).catch(error => log.warn({ err: error, phone: physical.phone }, 'Recheck after leaving a chat failed'))
+  }, RECHECK_AFTER_MS))
+  rechecks.get(chatKey)?.unref?.()
 }
 
 export interface Bubble { text: string; label: string; own: boolean }
