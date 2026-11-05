@@ -2,19 +2,24 @@ import { timingSafeEqual } from 'node:crypto'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import path from 'node:path'
 import { config } from './config.js'
-import { runOnDevice } from './device-queue.js'
+import { holdScreen, runOnDevice } from './device-queue.js'
 import { findDevice, whatsappPackage } from './devices.js'
 import { connect, release } from './drivers/index.js'
 import { SendFailure, SendUncertain } from './errors.js'
 import { RunError, runScript, type RunRequest } from './executor.js'
 import { saveFailure } from './failures.js'
-import { captureBeforeOperation, chatCapture, mediaSignature, reportOutgoing, startIncomingCapture } from './incoming.js'
+import { captureBeforeOperation, chatCapture, mediaSignature, reportOutgoing, startIncomingCapture, type Bubble } from './incoming.js'
 import { proposeFix } from './fixer.js'
 import { prepareMedia } from './media.js'
 import { startWatchdog } from './watchdog.js'
 import * as ledger from './ledger.js'
 import { log } from './logger.js'
+import { shell } from './adb.js'
 import { approveProposal, getProposal, listProposals, loadScript, rejectProposal, type Script } from './scripts.js'
+
+// PGW-37: how long a chat stays open after a text send for the next part of the same reply.
+const CHAT_HOLD_MS = 8000
+const openChats = new Map<string, { header: string; anchor?: Bubble }>()
 
 interface MessageBody {
   messageId?: unknown
@@ -100,20 +105,42 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
     // Download and convert while the phone is being started or connected.
     const media = request.media ? { ...request.media, prepared: prepareMedia(request.messageId, request.media) } : undefined
     media?.prepared?.catch(() => undefined)
-    const capture = request.text && !request.media ? chatCapture(device, request.to, request.text) : undefined
-    const result = await runOnDevice(device.phone, async () => {
+    const text = request.text && !request.media ? request.text : undefined
+    const chatTag = `chat:${request.to}`
+    const result = await runOnDevice(device.phone, async kept => {
       const serial = await connect(device)
       await captureBeforeOperation(device, serial)
+      // Contract: PGW-37 — the next part of a reply to the same chat is typed into the chat the last one left open.
+      const open = kept ? openChats.get(device.phone) : undefined
+      openChats.delete(device.phone)
+      const capture = text ? chatCapture(device, request.to, text, open?.anchor) : undefined
+      // On trial on the FAST_UI_SERIALS phones only.
+      const hold = !!capture && config.fastUi.serials.includes(serial)
       try {
-        return await runScript(serial, activeScript, { ...request, media, pkg: whatsappPackage(device) }, {
+        const run = await runScript(serial, activeScript, { ...request, media, pkg: whatsappPackage(device) }, {
           startedAt,
           onSendPressed: () => ledger.markSendPressed(request.messageId),
-          ...(capture ? { onChatOpened: capture.opened, beforeLeave: capture.beforeLeave } : {})
+          ...(capture ? { onChatOpened: capture.opened, beforeLeave: capture.beforeLeave, stayInChat: hold } : {}),
+          ...(open ? { reuseChat: open.header } : {})
         })
+        if (capture && hold && run.chatHeader) {
+          openChats.set(device.phone, { header: run.chatHeader, anchor: capture.last() })
+          holdScreen(device.phone, chatTag, async () => {
+            openChats.delete(device.phone)
+            const leaving = await connect(device)
+            try {
+              await capture.beforeLeave(leaving).catch(error => log.warn({ err: error }, 'Open chat capture failed'))
+              await shell(leaving, 'input keyevent KEYCODE_HOME')
+            } finally {
+              release(device, leaving)
+            }
+          }, CHAT_HOLD_MS)
+        }
+        return run
       } finally {
         release(device, serial)
       }
-    })
+    }, text ? chatTag : undefined)
     await ledger.finish(request.messageId, 'sent')
     res.json({ outcome: 'sent' })
     if (request.text && !request.media) void reportOutgoing(device, request.messageId, request.to, request.text).catch(error => log.warn({ err: error }, 'Outgoing text not queued for the backend'))

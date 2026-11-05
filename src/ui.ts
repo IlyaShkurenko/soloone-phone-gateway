@@ -1,4 +1,5 @@
 import { shell, sleep } from './adb.js'
+import { fastDump, fastUiEnabled, stopFastUi } from './fast-ui.js'
 
 export interface UiNode {
   index: number
@@ -55,6 +56,13 @@ export function parseUiTree(xml: string): UiNode[] {
 
 // Popups such as the reaction tray live in their own window and need `allWindows`.
 export async function dumpUi(serial: string, allWindows = false): Promise<UiNode[]> {
+  if (fastUiEnabled(serial)) {
+    try {
+      return parseUiTree(await fastDump(serial))
+    } catch (error) {
+      await stopFastUi(serial, error)
+    }
+  }
   for (let attempt = 0; attempt < 3; attempt++) {
     const flag = allWindows ? '--windows ' : ''
     const xml = await shell(serial, `uiautomator dump ${flag}/sdcard/gw-ui.xml >/dev/null 2>&1; cat /sdcard/gw-ui.xml`, 30_000)

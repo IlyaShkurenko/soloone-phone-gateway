@@ -45,6 +45,11 @@ export const config = {
   backendEventsUrl: process.env.BACKEND_EVENTS_URL?.trim() || '',
   // A UI snapshot is reused this long when nothing was done on the phone; 0 disables the cache.
   uiSnapshotCacheMs: parseInt(process.env.UI_SNAPSHOT_CACHE_MS || '5000', 10),
+  // PGW-36: phones (ADB serials) that read the screen through a resident uiautomator2 server.
+  fastUi: {
+    serials: (process.env.FAST_UI_SERIALS || '').split(',').map(item => item.trim()).filter(Boolean),
+    jarPath: process.env.FAST_UI_JAR || '/opt/u2/u2.jar'
+  },
   // Must stay below the backend's 150s request timeout (WA-PGW-4).
   requestDeadlineMs: 140_000,
   latestSendStartMs: 115_000

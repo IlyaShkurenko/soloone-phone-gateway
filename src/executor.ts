@@ -37,6 +37,10 @@ export interface RunOptions {
   onChatOpened?: (nodes: UiNode[]) => void
   // Runs before the chat is left, while it is still on screen (PGW-25).
   beforeLeave?: (serial: string) => Promise<void>
+  // PGW-37: the header of the chat a previous text send left open; reused when it is still the screen in front.
+  reuseChat?: string
+  // PGW-37: a successful run leaves the chat open for the next part of the same reply.
+  stayInChat?: boolean
 }
 
 export interface TraceEntry {
@@ -51,6 +55,8 @@ export interface TraceEntry {
 export interface RunResult {
   outcome: 'sent' | 'stopped_before_send'
   trace: TraceEntry[]
+  // The open chat's header, for PGW-37.
+  chatHeader?: string
 }
 
 // Evidence for the fixer: the screen where a step could not find its element.
@@ -95,6 +101,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
   let recoveriesLeft = MAX_RECOVERY_PER_RUN
   let sendPressed = false
   let chatHeader = ''
+  let stayed = false
   let staged: StagedMedia | undefined
   let bubble: UiNode | undefined
   let reacted = false
@@ -178,6 +185,12 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           if (request.media && request.media.type !== 'audio') throw new SendFailure('Text script used for media', false)
           const notOnWhatsapp = step.notOnWhatsapp as Selector | undefined
           const retryDialog = step.retryDialog as Selector | undefined
+          if (options.reuseChat && (await topActivity(serial)).includes('Conversation')
+            && find(await read(true), selectorParam(step, 'header'))?.text === options.reuseChat) {
+            chatHeader = options.reuseChat
+            entry.note = 'chat still open'
+            break
+          }
           let nodes: UiNode[] = []
           for (let attempt = 0; attempt < 3; attempt++) {
             await run(`am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${request.to}`)} -p ${quote(request.pkg)} >/dev/null`)
@@ -550,7 +563,8 @@ export async function runScript(serial: string, script: Script, request: RunRequ
       }
     }
     if (!sendPressed || (request.reaction && !reacted) || (request.deletion && !deleted) || (request.edit && !edited)) throw new SendFailure('Script finished without sending', false)
-    return { outcome: 'sent', trace }
+    stayed = !!options.stayInChat
+    return { outcome: 'sent', trace, chatHeader }
   } catch (error) {
     const cause = error instanceof SendFailure || error instanceof SendUncertain
       ? error
@@ -569,8 +583,8 @@ export async function runScript(serial: string, script: Script, request: RunRequ
     if (!staged && request.media?.prepared) await request.media.prepared.then(discardPrepared).catch(() => undefined)
     await staged?.cleanup()
     if (options.beforeLeave) await options.beforeLeave(serial).catch(() => undefined)
-    // Contract: PGW-11 — an open chat would mark new incoming messages as read.
-    await run('input keyevent KEYCODE_HOME').catch(() => undefined)
+    // Contract: PGW-11 — an open chat would mark new incoming messages as read; PGW-37 keeps it for a few seconds only.
+    if (!stayed) await run('input keyevent KEYCODE_HOME').catch(() => undefined)
   }
 }
 

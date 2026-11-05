@@ -6,7 +6,7 @@ import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:
 import path from 'node:path'
 import { pull, quote, screenshot, shell, sleep } from './adb.js'
 import { config } from './config.js'
-import { runOnDevice } from './device-queue.js'
+import { LEAVE_SCREEN_AS_IS, runOnDevice } from './device-queue.js'
 import { whatsappPackage, type Device } from './devices.js'
 import { connect } from './drivers/index.js'
 import { log } from './logger.js'
@@ -423,13 +423,16 @@ const sameText = (a: string, b: string) => {
 // Contract: PGW-25 — after a text send, customer bubbles below the newest bubble seen when the chat opened arrived
 // while it was open, so they had no notification: also those that came in while our text was being typed.
 // Other operations may leave the chat scrolled up, where older bubbles sit below ours, so they skip it.
-export function chatCapture(device: Device, to: string, sentText: string): {
+// `startAnchor` is the newest bubble when the previous send left the chat open (PGW-37).
+export function chatCapture(device: Device, to: string, sentText: string, startAnchor?: Bubble): {
   opened: (nodes: UiNode[]) => void
   beforeLeave: (serial: string) => Promise<void>
+  last: () => Bubble | undefined
 } {
-  let anchor: Bubble | undefined
+  let anchor = startAnchor
   return {
     opened: nodes => { anchor = chatBubbles(nodes).at(-1) },
+    last: () => anchor,
     beforeLeave: async (serial: string) => {
       const physical = capturing(device)
       if (!physical) return
@@ -442,7 +445,11 @@ export function chatCapture(device: Device, to: string, sentText: string): {
         await mkdir(dir(), { recursive: true })
         await writeFile(path.join(dir(), `names-${physical.phone}.json`), JSON.stringify(Object.fromEntries(state.names)))
       }
-      for (const { bubble, key: suffix } of newChatBubbles(anchor, chatBubbles(nodes), sentText)) {
+      const bubbles = chatBubbles(nodes)
+      const found = newChatBubbles(anchor, bubbles, sentText)
+      // What is on screen now is recorded; a later look starts below it.
+      if (bubbles.length) anchor = bubbles.at(-1)
+      for (const { bubble, key: suffix } of found) {
         const key = `c|${to}|${suffix}`
         if (state.seen.has(key)) continue
         state.seen.add(key)
@@ -506,10 +513,12 @@ async function prune(): Promise<void> {
 
 async function tick(device: PhysicalDevice): Promise<void> {
   const state = await loadState(device.phone)
-  await runOnDevice(device.phone, async () => {
+  await runOnDevice(device.phone, async screenHeld => {
     const serial = await connect(device)
     await pollNotifications(device, serial, state)
     await collectMedia(device, serial, state)
+    // PGW-37: a chat held open for the next part of a reply is not left for a profile or the chat list.
+    if (screenHeld) return
     const profile = state.profileQueue.shift()
     if (profile) await readProfile(device, serial, state, profile)
     const idle = Date.now() - state.lastOperationAt >= TICKS_EVERY_MS
@@ -517,7 +526,7 @@ async function tick(device: PhysicalDevice): Promise<void> {
       state.lastTicksAt = Date.now()
       await readTicks(device, serial, state)
     }
-  })
+  }, LEAVE_SCREEN_AS_IS)
 }
 
 export function startIncomingCapture(): void {
