@@ -228,8 +228,20 @@ export async function runScript(serial: string, script: Script, request: RunRequ
             `--grant-read-uri-permission -p ${quote(request.pkg)} >/dev/null`
           ].join(' '))
           const shareDialog = step.shareDialog as Selector | undefined
-          let nodes = await waitFor(step.target!, 15_000, shareDialog)
-          if (shareDialog && find(nodes, shareDialog)) {
+          const pickerRecipient = step.pickerRecipient as Selector | undefined
+          let nodes = await waitFor(step.target!, 15_000, shareDialog, pickerRecipient)
+          // Contract: PGW-39 — WhatsApp Business opens a video share in its contact picker with the chat already
+          // selected. Only when that one chip is exactly `to` is the picker's next button tapped; it opens the composer.
+          const chips = pickerRecipient ? findAll(nodes, pickerRecipient) : []
+          if (chips.length > 0 && !find(nodes, step.target!)) {
+            if (request.media.type !== 'video') throw new SendFailure('WhatsApp opened its contact picker for this photo', false)
+            if (chips.length !== 1 || chips[0]!.text.replace(/\D/g, '') !== request.to) throw new SendFailure('The contact picker has not selected exactly this chat', false)
+            const next = find(nodes, selectorParam(step, 'pickerNext'))
+            if (!next) throw new SendFailure('The contact picker has no next button', false)
+            await tapNode(next)
+            await sleep(1500)
+            nodes = await waitFor(step.target!, 20_000)
+          } else if (shareDialog && find(nodes, shareDialog)) {
             // AICODE-NOTE: For a video sent to one chat WhatsApp first asks "Share with <name>?";
             // OK then opens the media composer (checked 2026-10-20). For photos OK may send at once,
             // so only videos pass this dialog, and only through this code path, never recovery.
