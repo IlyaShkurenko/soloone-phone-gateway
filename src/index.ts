@@ -107,9 +107,13 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
     media?.prepared?.catch(() => undefined)
     const text = request.text && !request.media ? request.text : undefined
     const chatTag = `chat:${request.to}`
+    const timing: Record<string, number> = {}
     const result = await runOnDevice(device.phone, async kept => {
+      timing.queuedMs = Date.now() - startedAt
       const serial = await connect(device)
+      timing.connectMs = Date.now() - startedAt - timing.queuedMs
       await captureBeforeOperation(device, serial)
+      timing.captureMs = Date.now() - startedAt - timing.queuedMs - timing.connectMs
       // Contract: PGW-37 — the next part of a reply to the same chat is typed into the chat the last one left open.
       const open = kept ? openChats.get(device.phone) : undefined
       openChats.delete(device.phone)
@@ -143,6 +147,9 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
     }, text ? chatTag : undefined)
     await ledger.finish(request.messageId, 'sent')
     res.json({ outcome: 'sent' })
+    // Where the seconds of a send go: the wait for the phone, its connection, the capture, then each script step.
+    log.info({ messageId: request.messageId, from, totalMs: Date.now() - startedAt, ...timing,
+      steps: result.trace.map(entry => `${entry.op}@${entry.atMs}`).join(' ') }, 'Phone send timing')
     if (request.text && !request.media) void reportOutgoing(device, request.messageId, request.to, request.text).catch(error => log.warn({ err: error }, 'Outgoing text not queued for the backend'))
     if (needsFix(result.trace)) void proposeFix({ script, reason: 'The run needed recovery actions', trace: result.trace })
   } catch (error) {
