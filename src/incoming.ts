@@ -366,24 +366,39 @@ async function readProfile(device: PhysicalDevice, serial: string, state: PhoneS
   const pkg = whatsappPackage(device)
   let title: string | undefined
   let subtitle: string | undefined
+  let capture: ReturnType<typeof chatCapture> | undefined
   try {
     await shell(serial, `input keyevent KEYCODE_WAKEUP; am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${item.phone}`)} -p ${quote(pkg)} >/dev/null`)
     let header: UiNode | undefined
+    let nodes: UiNode[] = []
     for (const until = Date.now() + 12_000; !header && Date.now() < until; await sleep(800)) {
-      header = find(await dumpUi(serial), { resourceId: 'com.whatsapp:id/conversation_contact' })
+      nodes = await dumpUi(serial)
+      header = find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact' })
     }
     if (!header) return
+    // Contract: PGW-35 — while the chat is open its new messages raise no notification; they are read from the chat before leaving.
+    capture = chatCapture(device, item.phone, '')
+    capture.opened(nodes)
     await tap(serial, header)
     for (const until = Date.now() + 10_000; !title && Date.now() < until; await sleep(800)) {
-      const nodes = await dumpUi(serial)
-      title = find(nodes, { resourceId: 'com.whatsapp:id/contact_title' })?.text
-      subtitle = find(nodes, { resourceId: 'com.whatsapp:id/contact_subtitle' })?.text
+      const info = await dumpUi(serial)
+      // A WhatsApp Business account shows its business name and number instead of the contact fields.
+      title = find(info, { resourceId: 'com.whatsapp:id/contact_title' })?.text ?? find(info, { resourceId: 'com.whatsapp:id/business_title' })?.text
+      subtitle = find(info, { resourceId: 'com.whatsapp:id/contact_subtitle' })?.text
     }
   } finally {
-    await shell(serial, 'input keyevent KEYCODE_BACK; input keyevent KEYCODE_HOME').catch(() => undefined)
+    if (capture) {
+      await shell(serial, 'input keyevent KEYCODE_BACK').catch(() => undefined)
+      await sleep(800)
+      await capture.beforeLeave(serial).catch(error => log.warn({ err: error, phone: device.phone }, 'Chat capture after a profile read failed'))
+      await shell(serial, 'input keyevent KEYCODE_HOME').catch(() => undefined)
+    } else {
+      await shell(serial, 'input keyevent KEYCODE_BACK; input keyevent KEYCODE_HOME').catch(() => undefined)
+    }
     state.lastOperationAt = Date.now()
   }
-  // The profile screen shows the saved name or the number as its title and "~ name" for the name the person set.
+  // The profile screen shows the saved name or the number as its title and "~ name" for the name the person set;
+  // a business shows its business name as the title.
   const name = subtitle?.startsWith('~') ? subtitle : title && !phoneFromName(title) ? title : undefined
   state.profiled.add(item.chat)
   await writeFile(path.join(dir(), `profiled-${device.phone}.json`), JSON.stringify([...state.profiled]))
@@ -464,12 +479,15 @@ export interface Bubble { text: string; label: string; own: boolean }
 // Customer bubbles that came after `anchor`, with their key. When the anchor is gone from the screen, or the chat
 // showed nothing when it opened, only the bubbles below our sent one are taken, as they surely are new.
 export function newChatBubbles(anchor: Bubble | undefined, bubbles: Bubble[], sentText: string): Array<{ bubble: Bubble; key: string }> {
-  const ownIndex = lastIndex(bubbles, bubble => bubble.own)
-  if (ownIndex < 0 || !sameText(bubbles[ownIndex].text, sentText)) return []
+  // Without a text of ours (a profile read, PGW-35) there is no sent bubble: only what came after the anchor counts.
+  const ownIndex = sentText ? lastIndex(bubbles, bubble => bubble.own) : bubbles.length
+  if (sentText && (ownIndex < 0 || !sameText(bubbles[ownIndex].text, sentText))) return []
   // The anchor is the nearest bubble above ours that looks like it.
   const anchorIndex = anchor
     ? lastIndex(bubbles.slice(0, ownIndex), bubble => bubble.own === anchor.own && bubble.label === anchor.label && sameText(bubble.text, anchor.text))
     : -1
+  // With no anchor on screen nothing tells old bubbles from new ones; none is taken rather than recorded twice.
+  if (!sentText && anchorIndex < 0) return []
   const counts = new Map<string, number>()
   const found: Array<{ bubble: Bubble; key: string }> = []
   for (const bubble of bubbles.slice((anchorIndex >= 0 ? anchorIndex : ownIndex) + 1)) {

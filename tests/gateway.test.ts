@@ -177,3 +177,12 @@ test('customer bubbles after the bubble seen when the chat opened are new, also 
   // Our text is not the newest own bubble: nothing is taken.
   assert.deepEqual(newChatBubbles(anchor, bubbles, 'something else'), [])
 })
+
+// Contract: PGW-35 — a profile read sends nothing; what arrived below the bubble seen on opening is new.
+test('a profile read takes the customer bubbles after the one seen when the chat opened', () => {
+  const anchor = { text: 'Hi, do you do outcall?', label: '12:26', own: false }
+  const bubbles = [anchor, { text: 'Also can we speak in Spanish?', label: '12:26', own: false }]
+  assert.deepEqual(newChatBubbles(anchor, bubbles, '').map(item => item.key), ['12:26|Also can we speak in Spanish?'])
+  // The anchor is not on screen: nothing is taken rather than recorded twice.
+  assert.deepEqual(newChatBubbles(undefined, bubbles, ''), [])
+})
