@@ -217,6 +217,9 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           if (!request.media) throw new SendFailure('Media script used for text', false)
           const prepared = await (request.media.prepared ?? prepareMedia(request.messageId, request.media))
           staged = await stageMedia(serial, prepared)
+          await grantMediaAccess(serial, request.pkg)
+          // Preparing a video can outlast the screen timeout; the share must not open on a sleeping phone (PGW-13).
+          await run('input keyevent KEYCODE_WAKEUP')
           await run([
             'am start -a android.intent.action.SEND',
             `-t ${quote(staged.mimeType)}`,
@@ -599,6 +602,17 @@ export async function runScript(serial: string, script: Script, request: RunRequ
     // Contract: PGW-11 — an open chat would mark new incoming messages as read; PGW-37 keeps it for a few seconds only.
     if (!stayed) await run('input keyevent KEYCODE_HOME').catch(() => undefined)
   }
+}
+
+// Contract: PGW-38 — without photo and video access WhatsApp ignores the shared chat and opens its "Send to…" picker.
+// Granted once per phone and app in each gateway run; a permission this Android does not know is skipped.
+const mediaAccessGranted = new Set<string>()
+async function grantMediaAccess(serial: string, pkg: string): Promise<void> {
+  if (mediaAccessGranted.has(`${serial} ${pkg}`)) return
+  for (const permission of ['READ_MEDIA_IMAGES', 'READ_MEDIA_VIDEO', 'READ_MEDIA_VISUAL_USER_SELECTED']) {
+    await shell(serial, `pm grant ${quote(pkg)} android.permission.${permission}`).catch(() => undefined)
+  }
+  mediaAccessGranted.add(`${serial} ${pkg}`)
 }
 
 async function confirmSent(serial: string, step: Step, request: RunRequest, deadline: number): Promise<void> {
