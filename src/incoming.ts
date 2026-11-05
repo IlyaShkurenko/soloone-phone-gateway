@@ -490,6 +490,13 @@ function remember(state: PhoneState, to: string, text: string): void {
   state.recent.set(recentKey(to, text), now)
   for (const [key, at] of state.recent) if (now - at > RECENT_MS) state.recent.delete(key)
 }
+// The chat list shows the start of a long message, cut with an ellipsis.
+function recordedStart(state: PhoneState, to: string, preview: string): boolean {
+  const start = recentKey(to, preview).replace(/(…|\.\.\.)$/, '').trim()
+  const now = Date.now()
+  for (const [key, at] of state.recent) if (now - at <= RECENT_MS && key.startsWith(start)) return true
+  return false
+}
 function recorded(state: PhoneState, to: string, text: string): boolean {
   const at = state.recent.get(recentKey(to, text))
   return at !== undefined && Date.now() - at <= RECENT_MS
@@ -519,11 +526,12 @@ export function recheckAfterLeave(device: Device, to: string, header: string, an
         const nodes = await dumpUi(serial)
         const row = findAll(nodes, { resourceId: 'com.whatsapp:id/contact_row_container' })
           .find(item => nodes.some(node => node.resourceId === 'com.whatsapp:id/conversations_row_contact_name' && node.text === header && inside(node, item)))
-        const unread = row && nodes.find(node => node.resourceId === 'com.whatsapp:id/conversations_row_message_count' && inside(node, row))
-        if (!unread || !row) return
-        // Unread but already recorded from its notification: nothing was missed, and opening the chat would mark it read.
+        if (!row) return
+        // The row shows the chat's last message; ours carries a tick icon there, his does not. A message of his that
+        // came as the chat was being left is shown read (it reached the open chat), so the unread badge cannot tell.
+        if (nodes.some(node => node.resourceId === 'com.whatsapp:id/status_indicator' && inside(node, row))) return
         const preview = nodes.find(node => node.resourceId === 'com.whatsapp:id/single_msg_tv' && inside(node, row))?.text
-        if (preview && recorded(state, to, preview)) return
+        if (!preview || recordedStart(state, to, preview)) return
         await shell(serial, `am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${to}`)} -p ${quote(pkg)} >/dev/null`)
         for (const until = Date.now() + 10_000; Date.now() < until; await sleep(700)) {
           if (find(await dumpUi(serial), { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text === header) break
