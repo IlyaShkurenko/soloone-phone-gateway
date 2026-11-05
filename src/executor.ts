@@ -5,7 +5,7 @@ import { fastUiEnabled } from './fast-ui.js'
 import { audioTitle, discardPrepared, prepareMedia, stageMedia, type PreparedMedia, type StagedMedia } from './media.js'
 import { recoverOnce, type RecoveryAction } from './recovery.js'
 import type { Script, Step } from './scripts.js'
-import { clearFocusedInput, typeText } from './typing.js'
+import { clearFocusedInput, restoreKeyboard, typeText } from './typing.js'
 import { describeTree, dumpUi, find, findAll, longPress, sameEmoji, tap, type Selector, type UiNode } from './ui.js'
 
 export interface RunRequest {
@@ -299,7 +299,8 @@ export async function runScript(serial: string, script: Script, request: RunRequ
           const misses: string[] = []
           for (let attempt = 1; ; attempt++) {
             await tapNode(await locate(index, step, step.target!, entry))
-            await act(typeText(serial, request.text, request.typingTimeMs ?? 0))
+            // ADB Keyboard stays until the run leaves the chat: nothing slides in under Send, and the next part types at once.
+            await act(typeText(serial, request.text, request.typingTimeMs ?? 0, true))
             const typed = find(await read(true), step.target!)
             if (normalize(typed?.text || '') === normalize(request.text)) break
             misses.push(`typed back ${JSON.stringify(typed?.text ?? null)}`)
@@ -612,7 +613,10 @@ export async function runScript(serial: string, script: Script, request: RunRequ
     await staged?.cleanup()
     if (options.beforeLeave) await options.beforeLeave(serial).catch(() => undefined)
     // Contract: PGW-11 — an open chat would mark new incoming messages as read; PGW-37 keeps it for a few seconds only.
-    if (!stayed) await run('input keyevent KEYCODE_HOME').catch(() => undefined)
+    if (!stayed) {
+      await restoreKeyboard(serial).catch(() => undefined)
+      await run('input keyevent KEYCODE_HOME').catch(() => undefined)
+    }
   }
 }
 
@@ -671,7 +675,8 @@ async function confirmSent(serial: string, step: Step, request: RunRequest, dead
         if (ticks && okStatus.includes(ticks.desc)) return
       }
     }
-    await sleep(1200)
+    // A fast read costs little, so the tick is looked for more often.
+    await sleep(fastUiEnabled(serial) ? 400 : 1200)
   }
   throw new SendUncertain('Send was pressed but the sent bubble was not confirmed')
 }

@@ -35,9 +35,14 @@ export async function clearFocusedInput(serial: string, length: number): Promise
   }
 }
 
+// The keyboard each phone had before ADB Keyboard was switched in, until restoreKeyboard puts it back.
+const previousKeyboards = new Map<string, string>()
+
 // Contract: PGW-8 — without a typing time the text goes in as one piece: the phone round trips already
-// take real time. With one, it is spread over that time in small pieces. The keyboard is restored after.
-export async function typeText(serial: string, text: string, typingTimeMs = 0): Promise<void> {
+// take real time. With one, it is spread over that time in small pieces. With `keepKeyboard` ADB Keyboard
+// stays in place after typing (no on-screen keyboard slides in under Send, and the next part types at once);
+// restoreKeyboard brings the phone's own keyboard back.
+export async function typeText(serial: string, text: string, typingTimeMs = 0, keepKeyboard = false): Promise<void> {
   if (!text) return
   // Each adb round trip already costs time, so very long texts get fewer, larger pieces.
   const pieces = typingTimeMs > 0 ? Math.min(Array.from(text).length, Math.max(1, Math.floor(typingTimeMs / 350))) : 1
@@ -45,18 +50,19 @@ export async function typeText(serial: string, text: string, typingTimeMs = 0): 
   const pause = () => typingTimeMs > 0 ? sleep(Math.max(0, typingTimeMs / parts.length - 200) * (0.6 + Math.random() * 0.8)) : Promise.resolve()
 
   if (await hasAdbKeyboard(serial)) {
-    const previous = (await shell(serial, 'settings get secure default_input_method')).trim()
-    await shell(serial, `ime enable ${ADB_KEYBOARD} >/dev/null; ime set ${ADB_KEYBOARD} >/dev/null`)
-    try {
+    const current = (await shell(serial, 'settings get secure default_input_method')).trim()
+    if (current !== ADB_KEYBOARD) {
+      if (current && current !== 'null') previousKeyboards.set(serial, current)
+      await shell(serial, `ime enable ${ADB_KEYBOARD} >/dev/null; ime set ${ADB_KEYBOARD} >/dev/null`)
       await sleep(400)
+    }
+    try {
       for (const part of parts) {
         await shell(serial, `am broadcast -a ADB_INPUT_B64 --es msg ${quote(Buffer.from(part, 'utf8').toString('base64'))} >/dev/null`)
         await pause()
       }
     } finally {
-      if (previous && previous !== 'null' && previous !== ADB_KEYBOARD) {
-        await shell(serial, `ime set ${quote(previous)} >/dev/null`).catch(() => undefined)
-      }
+      if (!keepKeyboard) await restoreKeyboard(serial)
     }
     return
   }
@@ -67,3 +73,12 @@ export async function typeText(serial: string, text: string, typingTimeMs = 0): 
     await pause()
   }
 }
+
+/** The phone's own keyboard back in place of ADB Keyboard; nothing to do when it was never switched. */
+export async function restoreKeyboard(serial: string): Promise<void> {
+  const previous = previousKeyboards.get(serial)
+  if (!previous) return
+  previousKeyboards.delete(serial)
+  await shell(serial, `ime set ${quote(previous)} >/dev/null`).catch(() => undefined)
+}
+

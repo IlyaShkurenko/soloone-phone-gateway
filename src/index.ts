@@ -14,6 +14,7 @@ import { prepareMedia } from './media.js'
 import { startWatchdog } from './watchdog.js'
 import * as ledger from './ledger.js'
 import { log } from './logger.js'
+import { restoreKeyboard } from './typing.js'
 import { shell } from './adb.js'
 import { approveProposal, getProposal, listProposals, loadScript, rejectProposal, type Script } from './scripts.js'
 
@@ -112,7 +113,9 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
       timing.queuedMs = Date.now() - startedAt
       const serial = await connect(device)
       timing.connectMs = Date.now() - startedAt - timing.queuedMs
-      await captureBeforeOperation(device, serial)
+      // Between the parts of one reply the chat is still open (PGW-37): its own messages raise no notification
+      // and are read from the chat on leaving, and the 15-second round keeps polling the others.
+      if (!kept) await captureBeforeOperation(device, serial)
       timing.captureMs = Date.now() - startedAt - timing.queuedMs - timing.connectMs
       // Contract: PGW-37 — the next part of a reply to the same chat is typed into the chat the last one left open.
       const open = kept ? openChats.get(device.phone) : undefined
@@ -134,6 +137,7 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
             const leaving = await connect(device)
             try {
               await capture.beforeLeave(leaving).catch(error => log.warn({ err: error }, 'Open chat capture failed'))
+              await restoreKeyboard(leaving).catch(() => undefined)
               await shell(leaving, 'input keyevent KEYCODE_HOME')
             } finally {
               release(device, leaving)
