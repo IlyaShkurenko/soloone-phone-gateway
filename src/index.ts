@@ -17,6 +17,7 @@ import { log } from './logger.js'
 import { restoreKeyboard } from './typing.js'
 import { shell } from './adb.js'
 import { approveProposal, getProposal, listProposals, loadScript, rejectProposal, type Script } from './scripts.js'
+import { sendSms } from './sms.js'
 
 // PGW-37: how long a chat stays open after a text send for the next part of the same reply.
 const CHAT_HOLD_MS = 8000
@@ -182,6 +183,60 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
     if (script && error instanceof RunError && needsFix(error.trace, error)) {
       void proposeFix({ script, reason: error.message, trace: error.trace, evidence: error.evidence })
     }
+  }
+}
+
+// Contract: PGW-44 — an SMS from the SIM in the phone registered for `from`. One message ID never presses Send twice (PGW-3).
+async function sendSmsMessage(req: Request, res: Response): Promise<void> {
+  const body = req.body as MessageBody
+  if (typeof body.messageId !== 'string' || !/^[\w-]{8,64}$/.test(body.messageId)) return void failed(res, 'messageId is invalid', false)
+  if (typeof body.from !== 'string' || !/^\d{7,15}$/.test(body.from)) return void failed(res, 'from must be a phone number', false)
+  if (typeof body.to !== 'string' || !/^\d{7,15}$/.test(body.to)) return void failed(res, 'to must be a phone number', false)
+  if (typeof body.text !== 'string' || !body.text.trim()) return void failed(res, 'text is required', false)
+  const { messageId, from, to, text } = { messageId: body.messageId, from: body.from, to: body.to, text: body.text }
+
+  const admission = await ledger.admit(messageId)
+  if (admission.kind === 'in_progress') {
+    res.status(409).json({ outcome: 'in_progress' })
+    return
+  }
+  if (admission.kind === 'done') {
+    if (admission.state === 'sent') res.json({ outcome: 'sent' })
+    else res.status(502).json({ outcome: 'unknown', error: admission.error || 'Earlier attempt is uncertain' })
+    return
+  }
+
+  try {
+    const device = await findDevice(from)
+    if (!device || device.driver !== 'physical') throw new SendFailure(`No phone with a SIM is registered for ${from}`, false)
+    await runOnDevice(device.phone, async () => {
+      const serial = await connect(device)
+      await captureBeforeOperation(device, serial)
+      try {
+        await sendSms(serial, to, text, () => ledger.markSendPressed(messageId))
+      } finally {
+        await shell(serial, 'input keyevent KEYCODE_HOME').catch(() => undefined)
+        release(device, serial)
+      }
+    })
+    await ledger.finish(messageId, 'sent')
+    res.json({ outcome: 'sent' })
+  } catch (error) {
+    if (error instanceof SendUncertain) {
+      await ledger.finish(messageId, 'unknown', error.message)
+      res.status(502).json({ outcome: 'unknown', error: error.message })
+    } else {
+      const known = error instanceof SendFailure ? error : new SendFailure(error instanceof Error ? error.message : 'Phone gateway failed', true)
+      await ledger.finish(messageId, 'failed', known.message)
+      failed(res, known.message, known.retryable)
+    }
+    log.warn({ err: error, messageId }, 'Phone SMS did not complete')
+    void saveFailure({
+      messageId, outcome: error instanceof SendUncertain ? 'unknown' : 'failed',
+      error: error instanceof Error ? error.message : String(error),
+      retryable: error instanceof SendFailure ? error.retryable : undefined,
+      request: { from, to, text }
+    })
   }
 }
 
@@ -449,6 +504,7 @@ app.get('/v1/incoming-media/:name', (req, res) => {
 })
 app.use('/v1', (req, res, next) => authorized(req) ? next() : res.status(401).json({ error: 'Unauthorized' }))
 app.post('/v1/messages', (req, res, next) => { sendMessage(req, res).catch(next) })
+app.post('/v1/sms', (req, res, next) => { sendSmsMessage(req, res).catch(next) })
 app.post('/v1/reactions', (req, res, next) => { sendReaction(req, res).catch(next) })
 app.post('/v1/deletions', (req, res, next) => { sendDeletion(req, res).catch(next) })
 app.post('/v1/edits', (req, res, next) => { sendEdit(req, res).catch(next) })

@@ -12,6 +12,7 @@ import { whatsappPackage, type Device } from './devices.js'
 import { connect, release } from './drivers/index.js'
 import { log } from './logger.js'
 import { watchNotifications } from './notification-watch.js'
+import { inboxSmsAfter, lastSmsId } from './sms.js'
 import { dumpUi, find, findAll, tap, type UiNode } from './ui.js'
 
 type PhysicalDevice = Extract<Device, { driver: 'physical' }>
@@ -42,7 +43,7 @@ type MediaKind = 'image' | 'video' | 'voice' | 'audio' | 'document'
 
 interface PendingMedia { key: string; kind: MediaKind; time: number }
 
-interface BackendEvent { id: string; kind: 'message' | 'tick' | 'outgoing' | 'state' | 'profile'; [field: string]: unknown }
+interface BackendEvent { id: string; kind: 'message' | 'tick' | 'outgoing' | 'state' | 'profile' | 'sms'; [field: string]: unknown }
 
 interface PhoneState {
   names: Map<string, string>
@@ -602,11 +603,38 @@ async function prune(): Promise<void> {
   }
 }
 
+// Contract: PGW-46 — new SMS in the phone's inbox, after the newest one seen. The first look starts from the
+// newest SMS already on the phone, so older ones are not reported.
+const smsSeen = new Map<string, number>()
+async function pollSms(device: PhysicalDevice, serial: string): Promise<void> {
+  const file = path.join(dir(), `sms-${device.phone}.json`)
+  let last = smsSeen.get(device.phone)
+  if (last === undefined) {
+    const saved = await readFile(file, 'utf8').then(JSON.parse).catch(() => null) as { lastId?: unknown } | null
+    last = typeof saved?.lastId === 'number' ? saved.lastId : await lastSmsId(serial)
+    smsSeen.set(device.phone, last)
+    if (typeof saved?.lastId !== 'number') {
+      await mkdir(dir(), { recursive: true })
+      await writeFile(file, JSON.stringify({ lastId: last }))
+    }
+  }
+  const fresh = await inboxSmsAfter(serial, last)
+  if (!fresh.length) return
+  for (const sms of fresh) {
+    const key = `sms|${device.phone}|${sms.id}|${sms.date}`
+    await write(device.phone, { kind: 'sms', key, from: sms.address, text: sms.body, time: sms.date })
+    await enqueue(device.phone, { id: eventId(key), kind: 'sms', from: sms.address, text: sms.body, time: sms.date })
+  }
+  smsSeen.set(device.phone, fresh[fresh.length - 1].id)
+  await writeFile(file, JSON.stringify({ lastId: fresh[fresh.length - 1].id }))
+}
+
 async function tick(device: PhysicalDevice): Promise<void> {
   const state = await loadState(device.phone)
   await runOnDevice(device.phone, async screenHeld => {
     const serial = await connect(device)
     await pollNotifications(device, serial, state)
+    await pollSms(device, serial).catch(error => log.warn({ err: error, phone: device.phone }, 'SMS inbox read failed'))
     await collectMedia(device, serial, state)
     // PGW-37: a chat held open for the next part of a reply is not left for a profile or the chat list.
     if (screenHeld) return

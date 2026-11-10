@@ -196,3 +196,14 @@ test('only a WhatsApp notify line in the phone log starts a capture', () => {
   assert.equal(isWhatsAppNotify('I/NotificationManager( 2201): com.google.android.gms: notify(4, null, Notification(channel=Fido'), false)
   assert.equal(isWhatsAppNotify('D/EdgeLightingManager( 1664): showForNotification : packageName = com.whatsapp.w4b'), false)
 })
+
+// Contract: PGW-46
+test('SMS rows keep a body with commas and line breaks', async () => {
+  const { parseSmsRows } = await import('../src/sms.js')
+  const rows = parseSmsRows('Row: 1 _id=7, type=1, address=+447700900123, date=1794305012409, body=Hi, are you free\ntomorrow?\r\nRow: 0 _id=5, type=2, address=+447700900456, date=1794305010502, body=Yes\n')
+  assert.deepEqual(rows.map(row => [row.id, row.type, row.address, row.body]), [
+    [5, 2, '+447700900456', 'Yes'],
+    [7, 1, '+447700900123', 'Hi, are you free\ntomorrow?']
+  ])
+  assert.deepEqual(parseSmsRows('No result found.\n'), [])
+})
