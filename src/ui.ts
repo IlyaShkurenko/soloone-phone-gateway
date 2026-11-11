@@ -37,7 +37,8 @@ export function parseUiTree(xml: string): UiNode[] {
   const nodes: UiNode[] = []
   for (const [, raw] of xml.matchAll(/<node\s([^>]*?)\/?>/g)) {
     const attrs: Record<string, string> = {}
-    for (const [, key, value] of raw.matchAll(/([\w-]+)="([^"]*)"/g)) attrs[key] = decode(value)
+    // A value holding a double quote (a message with "quotes") comes in single quotes.
+    for (const [, key, double, single] of raw.matchAll(/([\w-]+)=(?:"([^"]*)"|'([^']*)')/g)) attrs[key] = decode(double ?? single)
     const b = attrs.bounds?.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/)
     nodes.push({
       index: nodes.length,

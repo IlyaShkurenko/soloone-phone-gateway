@@ -26,6 +26,14 @@ test('UI tree parser decodes entities and bounds', () => {
   assert.equal(nodes[2].clickable, true)
 })
 
+// Contract: PGW-5 — the dump writes a value holding a double quote in single quotes.
+test('UI tree parser reads a value in single quotes', () => {
+  const [node] = parseUiTree(`<node index="1" text='q "quoted" &amp; $HOME \\ `+'`tick`'+`' resource-id="com.whatsapp.w4b:id/entry" bounds="[158,1978][761,2133]" />`)
+  assert.equal(node.text, 'q "quoted" & $HOME \\ `tick`')
+  assert.equal(node.resourceId, 'com.whatsapp:id/entry')
+  assert.deepEqual(node.bounds, [158, 1978, 761, 2133])
+})
+
 // Contract: PGW-5
 test('WhatsApp Business resource ids match the regular WhatsApp selectors', () => {
   const nodes = parseUiTree(`<node text="" resource-id="com.whatsapp.w4b:id/send" class="android.widget.ImageButton" content-desc="Send" clickable="true" bounds="[1,1][2,2]" />`)
@@ -185,6 +193,27 @@ test('a profile read takes the customer bubbles after the one seen when the chat
   assert.deepEqual(newChatBubbles(anchor, bubbles, '').map(item => item.key), ['12:26|Also can we speak in Spanish?'])
   // The anchor is not on screen: nothing is taken rather than recorded twice.
   assert.deepEqual(newChatBubbles(undefined, bubbles, ''), [])
+})
+
+const { missedBubbles, labelMinute } = await import('../src/incoming.js')
+
+// Contract: PGW-47
+test('fresh unrecorded customer bubbles below our newest one are missed messages', () => {
+  const bubbles = [
+    { text: 'old one', label: '10:30', own: false },
+    { text: 'our reply', label: '10:40', own: true },
+    { text: 'came by notification', label: '10:52', own: false },
+    { text: 'Test 3A', label: '10:54', own: false },
+    { text: 'earlier today', label: '10:41', own: false }
+  ]
+  const known = (text: string) => text === 'came by notification'
+  // 10:41 is older than 10 minutes, 10:52 was recorded.
+  assert.deepEqual(missedBubbles(bubbles, labelMinute('10:55')!, known).map(item => item.key), ['10:54|Test 3A'])
+  // Across midnight the label of 23:58 is 3 minutes old.
+  assert.deepEqual(missedBubbles([{ text: 'late', label: '23:58', own: false }], labelMinute('00:01')!, () => false).map(item => item.key), ['23:58|late'])
+  assert.deepEqual(missedBubbles([{ text: 'x', label: 'Yesterday', own: false }], 600, () => false), [])
+  assert.equal(labelMinute('1:05 pm'), 13 * 60 + 5)
+  assert.equal(labelMinute('12:10 am'), 10)
 })
 
 const { isWhatsAppNotify } = await import('../src/notification-watch.js')

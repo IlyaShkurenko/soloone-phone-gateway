@@ -158,18 +158,26 @@ async function loadState(phone: string): Promise<PhoneState> {
   if (existing) return existing
   const state: PhoneState = { names: new Map(), profiled: new Set(), profileQueue: [], seen: new Set(), usedFiles: new Set(), pending: [], ticks: new Map(), lastOperationAt: 0, lastTicksAt: 0, recent: new Map() }
   const files = (await readdir(dir()).catch(() => [] as string[])).filter(name => name.endsWith('.jsonl')).sort().slice(-2)
+  const messages: Array<{ at: number; source?: string; chat?: string; sender?: string; text: string }> = []
   for (const name of files) {
     for (const line of (await readFile(path.join(dir(), name), 'utf8')).split('\n')) {
       if (!line) continue
-      const record = JSON.parse(line) as { phone?: string; key?: string; file?: string; kind?: string; chat?: string; tick?: string; preview?: string }
+      const record = JSON.parse(line) as { at?: string; phone?: string; key?: string; file?: string; kind?: string; chat?: string; tick?: string; preview?: string; source?: string; sender?: string; text?: string }
       if (record.phone !== phone) continue
       if (record.key) state.seen.add(record.key)
       if (record.file) state.usedFiles.add(record.file)
       if (record.kind === 'tick' && record.chat && record.tick) state.ticks.set(`${record.chat}|${record.preview ?? ''}`, record.tick)
+      const at = Date.parse(record.at ?? '')
+      if (record.kind === 'message' && typeof record.text === 'string' && Date.now() - at <= KNOWN_MS) messages.push({ ...record, at, text: record.text })
     }
   }
   const names = await readFile(path.join(dir(), `names-${phone}.json`), 'utf8').then(JSON.parse).catch(() => ({})) as Record<string, string>
   for (const [name, to] of Object.entries(names)) state.names.set(name, to)
+  // PGW-47 must know what was recorded just before a restart.
+  for (const message of messages) {
+    const to = message.source === 'chat' ? message.chat : phoneFromName(message.sender) || (message.sender && state.names.get(message.sender)) || message.sender
+    if (to) remember(state, to, message.text, message.at)
+  }
   const profiled = await readFile(path.join(dir(), `profiled-${phone}.json`), 'utf8').then(JSON.parse).catch(() => []) as string[]
   for (const chat of profiled) state.profiled.add(chat)
   states.set(phone, state)
@@ -262,7 +270,8 @@ async function pollNotifications(device: PhysicalDevice, serial: string, state: 
     }
     const kind = mediaKind(message)
     const from = phoneFromName(message.sender) || (message.sender ? state.names.get(message.sender) : undefined)
-    if (from) remember(state, from, message.text)
+    // A sender with no known number is remembered by name; the chat header shows the same name (PGW-47).
+    if (from || message.sender) remember(state, from || message.sender, message.text)
     await write(device.phone, { kind: 'message', source: 'notification', key, ...message, ...(kind ? { media: kind } : {}) })
     const event = messageEvent(key, message.chat, message)
     // Contract: PGW-35 — a sender the phone shows only by number gets its WhatsApp profile name read once.
@@ -350,9 +359,18 @@ async function readTicks(device: PhysicalDevice, serial: string, state: PhoneSta
   } finally {
     await shell(serial, 'input keyevent KEYCODE_HOME').catch(() => undefined)
   }
+  const missed: Array<{ to: string; header: string; preview: string }> = []
+  const now = await phoneMinute(serial).catch(() => undefined)
   for (const row of findAll(nodes, { resourceId: 'com.whatsapp:id/contact_row_container' })) {
     const name = nodes.find(node => node.resourceId === 'com.whatsapp:id/conversations_row_contact_name' && inside(node, row))
     const icon = nodes.find(node => node.resourceId === 'com.whatsapp:id/status_indicator' && inside(node, row))
+    // Contract: PGW-47 — a row whose last message is his (no tick icon), from the last minutes and not recorded.
+    if (name?.text && !icon && now !== undefined) {
+      const to = phoneFromName(name.text) || state.names.get(name.text)
+      const preview = nodes.find(node => node.resourceId === 'com.whatsapp:id/single_msg_tv' && inside(node, row))?.text
+      const date = nodes.find(node => node.resourceId === 'com.whatsapp:id/conversations_row_date' && inside(node, row))?.text
+      if (to && preview && isFresh(date, now) && !recordedStart(state, [to, name.text], preview, KNOWN_MS)) missed.push({ to, header: name.text, preview })
+    }
     if (!name?.text || !icon) continue
     const reading = classifyTick(await cropRaw(png, icon.bounds), icon.bounds[2] - icon.bounds[0])
     const preview = nodes.find(node => node.resourceId === 'com.whatsapp:id/single_msg_tv' && inside(node, row))?.text || ''
@@ -367,6 +385,33 @@ async function readTicks(device: PhysicalDevice, serial: string, state: PhoneSta
     if (to && (reading.tick === 'delivered' || reading.tick === 'read')) {
       await enqueue(device.phone, { id: eventId(`t|${to}|${reading.tick}|${preview}|${Date.now()}`), kind: 'tick', to, tick: reading.tick, preview })
     }
+  }
+  if (!missed.length) return
+  // Opening the chat list can take a notification away; one still there is recorded first, not twice.
+  await pollNotifications(device, serial, state)
+  for (const item of missed.slice(0, 3)) {
+    if (recordedStart(state, [item.to, item.header], item.preview, KNOWN_MS)) continue
+    await readMissedChat(device, serial, item.to, item.header)
+    log.info({ phone: device.phone, to: item.to }, 'A message missed by the notifications was read from the chat')
+  }
+}
+
+// Contract: PGW-47 — opens the chat; its capture records the fresh customer bubbles that were not recorded.
+async function readMissedChat(device: PhysicalDevice, serial: string, to: string, header: string): Promise<void> {
+  const pkg = whatsappPackage(device)
+  try {
+    await shell(serial, `input keyevent KEYCODE_WAKEUP; am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${to}`)} -p ${quote(pkg)} >/dev/null`)
+    let nodes: UiNode[] = []
+    for (const until = Date.now() + 10_000; Date.now() < until; await sleep(700)) {
+      nodes = await dumpUi(serial)
+      if (find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text === header) break
+    }
+    if (find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text !== header) return
+    const capture = chatCapture(device, to, '')
+    capture.opened(nodes)
+    await capture.beforeLeave(serial)
+  } finally {
+    await shell(serial, 'input keyevent KEYCODE_HOME').catch(() => undefined)
   }
 }
 
@@ -447,14 +492,18 @@ const sameText = (a: string, b: string) => {
 // `startAnchor` is the newest bubble when the previous send left the chat open (PGW-37).
 export function chatCapture(device: Device, to: string, sentText: string, startAnchor?: Bubble): {
   opened: (nodes: UiNode[]) => void
-  beforeLeave: (serial: string) => Promise<void>
+  beforeLeave: (serial: string, sent?: boolean) => Promise<void>
   last: () => Bubble | undefined
 } {
   let anchor = startAnchor
+  let shownOnOpen: Bubble[] | undefined
   return {
-    opened: nodes => { anchor = chatBubbles(nodes).at(-1) },
+    opened: nodes => {
+      shownOnOpen = chatBubbles(nodes)
+      anchor = shownOnOpen.at(-1)
+    },
     last: () => anchor,
-    beforeLeave: async (serial: string) => {
+    beforeLeave: async (serial: string, sent = true) => {
       const physical = capturing(device)
       if (!physical) return
       const state = await loadState(physical.phone)
@@ -467,7 +516,16 @@ export function chatCapture(device: Device, to: string, sentText: string, startA
         await writeFile(path.join(dir(), `names-${physical.phone}.json`), JSON.stringify(Object.fromEntries(state.names)))
       }
       const bubbles = chatBubbles(nodes)
-      const found = newChatBubbles(anchor, bubbles, sentText)
+      // A send that stopped before Send left no bubble of ours; what came after the anchor still arrived meanwhile.
+      const found = newChatBubbles(anchor, bubbles, sent ? sentText : '')
+      // Contract: PGW-47 — fresh customer bubbles already there when the chat opened that no way recorded.
+      const opened = shownOnOpen
+      shownOnOpen = undefined
+      if (opened && hasFreshCandidate(opened)) {
+        const now = await phoneMinute(serial).catch(() => undefined)
+        const names = header ? [to, header] : [to]
+        if (now !== undefined) found.unshift(...missedBubbles(opened, now, text => recordedWithin(state, names, text, KNOWN_MS)))
+      }
       // What is on screen now is recorded; a later look starts below it.
       if (bubbles.length) anchor = bubbles.at(-1)
       for (const { bubble, key: suffix } of found) {
@@ -485,22 +543,68 @@ export function chatCapture(device: Device, to: string, sentText: string, startA
 }
 
 const RECENT_MS = 3 * 60 * 1000
+// PGW-47 looks back FRESH_MINUTES at bubble labels and so needs a longer memory of what was recorded.
+const FRESH_MINUTES = 10
+const KNOWN_MS = 15 * 60 * 1000
 const recentKey = (to: string, text: string) => `${to}|${text.replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim()}`
-function remember(state: PhoneState, to: string, text: string): void {
+function remember(state: PhoneState, to: string, text: string, at = Date.now()): void {
+  const key = recentKey(to, text)
+  state.recent.set(key, Math.max(at, state.recent.get(key) ?? 0))
   const now = Date.now()
-  state.recent.set(recentKey(to, text), now)
-  for (const [key, at] of state.recent) if (now - at > RECENT_MS) state.recent.delete(key)
+  for (const [item, when] of state.recent) if (now - when > KNOWN_MS) state.recent.delete(item)
 }
 // The chat list shows the start of a long message, cut with an ellipsis.
-function recordedStart(state: PhoneState, to: string, preview: string): boolean {
-  const start = recentKey(to, preview).replace(/(…|\.\.\.)$/, '').trim()
+function recordedStart(state: PhoneState, names: string[], preview: string, within = RECENT_MS): boolean {
   const now = Date.now()
-  for (const [key, at] of state.recent) if (now - at <= RECENT_MS && key.startsWith(start)) return true
+  for (const name of names) {
+    const start = recentKey(name, preview).replace(/(…|\.\.\.)$/, '').trim()
+    for (const [key, at] of state.recent) if (now - at <= within && key.startsWith(start)) return true
+  }
   return false
 }
-function recorded(state: PhoneState, to: string, text: string): boolean {
-  const at = state.recent.get(recentKey(to, text))
-  return at !== undefined && Date.now() - at <= RECENT_MS
+function recordedWithin(state: PhoneState, names: string[], text: string, within: number): boolean {
+  return names.some(name => {
+    const at = state.recent.get(recentKey(name, text))
+    return at !== undefined && Date.now() - at <= within
+  })
+}
+const recorded = (state: PhoneState, to: string, text: string) => recordedWithin(state, [to], text, RECENT_MS)
+
+// Minutes since midnight on the phone's clock, the clock its chat labels use.
+async function phoneMinute(serial: string): Promise<number> {
+  const minute = labelMinute((await shell(serial, 'date +%H:%M')).trim())
+  if (minute === undefined) throw new Error('Phone time is not readable')
+  return minute
+}
+
+export function labelMinute(label: string | undefined): number | undefined {
+  const match = label?.trim().match(/^(\d{1,2}):(\d{2})(?:\s*([ap])\.?\s?m\.?)?$/i)
+  if (!match) return undefined
+  const hours = Number(match[1]) % (match[3] ? 12 : 24) + (match[3]?.toLowerCase() === 'p' ? 12 : 0)
+  return hours * 60 + Number(match[2])
+}
+
+// A label shows only the time for today; "Yesterday" or a date is never fresh.
+function isFresh(label: string | undefined, now: number): boolean {
+  const minute = labelMinute(label)
+  return minute !== undefined && (now - minute + 1440) % 1440 <= FRESH_MINUTES
+}
+
+const hasFreshCandidate = (bubbles: Bubble[]) => bubbles.slice(lastIndex(bubbles, bubble => bubble.own) + 1).some(bubble => !bubble.own)
+
+// Contract: PGW-47 — customer bubbles below our newest one, labelled within the last minutes and not recorded,
+// are messages no notification brought: one that came while WhatsApp was open on another screen.
+export function missedBubbles(bubbles: Bubble[], now: number, known: (text: string) => boolean): Array<{ bubble: Bubble; key: string }> {
+  const counts = new Map<string, number>()
+  const found: Array<{ bubble: Bubble; key: string }> = []
+  for (const bubble of bubbles.slice(lastIndex(bubbles, item => item.own) + 1)) {
+    const base = `${bubble.label}|${bubble.text}`
+    const count = (counts.get(base) || 0) + 1
+    counts.set(base, count)
+    if (bubble.own || !isFresh(bubble.label, now) || known(bubble.text)) continue
+    found.push({ bubble, key: count > 1 ? `${base}|${count}` : base })
+  }
+  return found
 }
 
 // Contract: PGW-43 — a message that reaches the chat in the moment the gateway leaves it gets no notification.
@@ -532,7 +636,7 @@ export function recheckAfterLeave(device: Device, to: string, header: string, an
         // came as the chat was being left is shown read (it reached the open chat), so the unread badge cannot tell.
         if (nodes.some(node => node.resourceId === 'com.whatsapp:id/status_indicator' && inside(node, row))) return
         const preview = nodes.find(node => node.resourceId === 'com.whatsapp:id/single_msg_tv' && inside(node, row))?.text
-        if (!preview || recordedStart(state, to, preview)) return
+        if (!preview || recordedStart(state, [to], preview)) return
         await shell(serial, `am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${to}`)} -p ${quote(pkg)} >/dev/null`)
         for (const until = Date.now() + 10_000; Date.now() < until; await sleep(700)) {
           if (find(await dumpUi(serial), { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text === header) break
