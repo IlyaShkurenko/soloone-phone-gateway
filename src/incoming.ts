@@ -348,7 +348,8 @@ async function readTicks(device: PhysicalDevice, serial: string, state: PhoneSta
     await shell(serial, `input keyevent KEYCODE_WAKEUP; am start -W -f 0x10008000 -n ${pkg}/com.whatsapp.Main >/dev/null`, 30_000)
     await sleep(1500)
     nodes = await dumpUi(serial)
-    const notNow = find(nodes, { text: 'NOT NOW' })
+    // The Google backup setup screen can stand in front of the chat list too, with "Not now".
+    const notNow = find(nodes, { text: 'NOT NOW' }) ?? find(nodes, { resourceId: 'com.whatsapp:id/gdrive_new_user_setup_not_now_btn' })
     if (notNow) {
       await tap(serial, notNow)
       await sleep(1500)
