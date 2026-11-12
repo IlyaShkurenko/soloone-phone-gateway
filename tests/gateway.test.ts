@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
@@ -91,7 +92,7 @@ test('shipped scripts are valid', async () => {
   }
 })
 
-const { parseNotifications, mediaKind, classifyTick } = await import('../src/incoming.js')
+const { parseNotifications, notificationFilter, mediaKind, classifyTick } = await import('../src/incoming.js')
 
 // Shape of the phone-side filtered dump, taken from port41 on 2026-11-03.
 const notificationDump = `@@record
@@ -122,6 +123,34 @@ test('notification messages are read per message, skipping summaries, groups and
     ['253197079818371@lid', 'Mr Ill', 'two\nlines', 1793712821000]
   ])
   assert.equal(messages[1].mimeType, 'image/jpeg')
+})
+
+// Shape of the raw dump on phone 8, 2026-11-12: a text with line breaks goes on from the first column.
+const rawDump = `Current Notification Manager state:
+  Notification List:
+    NotificationRecord(0x0f1: pkg=com.whatsapp.w4b user=UserHandle{0} id=1 tag=x importance=4)
+      shortcut=447868102932@s.whatsapp.net found valid? true
+            extras={
+                android.template=String (android.app.Notification$MessagingStyle)
+                android.text=String (Are you free tomorrow at 3?
+
+How much for an hour?)
+                android.messages=Bundle[] (1)
+                  [0] Bundle[{extras=Bundle[{}], sender_person=android.app.Person@181d1ecf, sender=+44 7868 102932, text=Are you free tomorrow at 3?
+
+How much for an hour?, time=1794518914000}]
+                android.showWhen=Boolean (true)
+                android.isGroupConversation=Boolean (false)
+            }
+  TimeoutPendingIntent:
+`
+
+// Contract: PGW-23
+test('the phone-side filter keeps a message with line breaks whole', () => {
+  const filtered = execFileSync('awk', [notificationFilter('com.whatsapp.w4b')], { input: rawDump, encoding: 'utf8' })
+  assert.deepEqual(parseNotifications(filtered).map(message => [message.chat, message.text, message.time]), [
+    ['447868102932@s.whatsapp.net', 'Are you free tomorrow at 3?\n\nHow much for an hour?', 1794518914000]
+  ])
 })
 
 // Contract: PGW-24

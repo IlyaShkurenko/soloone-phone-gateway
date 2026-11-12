@@ -77,17 +77,22 @@ export function mediaCaption(text: string): string | undefined {
 
 // The dump is filtered on the phone: only WhatsApp records, and only the lines that carry messages,
 // so a poll costs about a kilobyte of mobile data instead of half a megabyte.
-function notificationCommand(pkg: string): string {
-  const program = [
+export function notificationFilter(pkg: string): string {
+  return [
     `/^    NotificationRecord\\(/{p=index($0,"pkg=${pkg} ")>0; m=0; if(p)print "@@record"}`,
-    '/^(  )?[A-Za-z]/{p=0}',
+    // AICODE-NOTE: the sections after the records start with two spaces. A line in the first column is the
+    // rest of a text with line breaks (android.text comes before android.messages), so it must not end the record.
+    '/^  [A-Za-z]/{p=0}',
     '!p{next}',
     '/^      shortcut=/{print; next}',
     '/android\\.(template|isGroupConversation)=/{print; next}',
     '/^                android\\./{m=($0 ~ /android\\.messages=/); next}',
     'm{print}'
   ].join(' ')
-  return `dumpsys notification --noredact | awk ${quote(program)}`
+}
+
+function notificationCommand(pkg: string): string {
+  return `dumpsys notification --noredact | awk ${quote(notificationFilter(pkg))}`
 }
 
 // Contract: PGW-23 — one entry per message of a one-to-one chat notification; our own lines have no sender.
