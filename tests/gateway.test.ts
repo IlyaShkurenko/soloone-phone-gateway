@@ -35,6 +35,13 @@ test('UI tree parser reads a value in single quotes', () => {
   assert.deepEqual(node.bounds, [158, 1978, 761, 2133])
 })
 
+// Contract: PGW-36 — read back on phone 7, 2026-11-13: the fast UI server returns 🤗 as "..".
+test('a message with an emoji outside the BMP matches what the fast UI server reads', async () => {
+  const { normalize } = await import('../src/executor.js')
+  assert.equal(normalize('Want to meet or something new ..'), normalize('Want to meet or something new 🤗'))
+  assert.equal(normalize('Hi 🤗'), normalize('Hi 🤗'))
+})
+
 // Contract: PGW-5
 test('WhatsApp Business resource ids match the regular WhatsApp selectors', () => {
   const nodes = parseUiTree(`<node text="" resource-id="com.whatsapp.w4b:id/send" class="android.widget.ImageButton" content-desc="Send" clickable="true" bounds="[1,1][2,2]" />`)

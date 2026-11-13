@@ -87,7 +87,9 @@ export class RunError extends Error {
 
 const MAX_RECOVERY_PER_STEP = 3
 const MAX_RECOVERY_PER_RUN = 6
-const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
+// AICODE-NOTE: the fast UI server (PGW-36) reads each half of a character outside the BMP, such as 🤗, as "."
+// while the plain dump keeps it, so both sides of a comparison turn those halves into dots.
+export const normalize = (value: string) => value.replace(/[\uD800-\uDFFF]/g, '.').replace(/\s+/g, ' ').trim()
 // AICODE-NOTE: a chat bubble shows WhatsApp formatting (*bold*, _italic_, ~strike~, ```mono```) without its
 // markers, so bubble text is compared with them removed. The typed input still holds them and is compared as is.
 const sameBubbleText = (shown: string, sent: string) => {
