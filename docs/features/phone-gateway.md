@@ -1,6 +1,6 @@
 # Phone gateway
 
-Decision: workspace RFC-006. The backend side is `soloone-backend/docs/features/phone-gateway-transport.md` (WA-PGW-*).
+Decision: workspace RFC-006. The backend side is `soloone-backend/docs/features/phone-gateway-transport.md` (WA-PGW-*). Setting up a new phone: `../adding-a-phone.md`.
 
 ## Contracts
 
