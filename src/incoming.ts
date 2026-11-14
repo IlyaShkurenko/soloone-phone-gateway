@@ -436,9 +436,14 @@ async function openChatByName(serial: string, pkg: string, name: string): Promis
   const rows = findAll(nodes, { resourceId: 'com.whatsapp:id/conversations_row_contact_name' }).filter(node => node.text === name)
   if (rows.length !== 1) return undefined
   await tap(serial, rows[0])
+  // The chat slides in from the side: its header shows the name while still off screen, and a tap there misses.
+  let settled: string | undefined
   for (const until = Date.now() + 10_000; Date.now() < until; await sleep(700)) {
     nodes = await dumpUi(serial)
-    if (find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text === name) return nodes
+    const header = find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact' })
+    const at = header && find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text === name ? header.bounds.join() : undefined
+    if (at && at === settled) return nodes
+    settled = at
   }
   return undefined
 }
@@ -493,6 +498,8 @@ async function readProfile(device: PhysicalDevice, serial: string, state: PhoneS
   // The profile screen shows the saved name or the number as its title and "~ name" for the name the person set;
   // a business shows its business name as the title.
   const name = subtitle?.startsWith('~') ? subtitle : title && !phoneFromName(title) ? title : undefined
+  // A contact screen that did not open is tried again on the chat's next message.
+  if (!title && !subtitle) return
   state.profiled.add(item.chat)
   await writeFile(path.join(dir(), `profiled-${device.phone}.json`), JSON.stringify([...state.profiled]))
   await write(device.phone, { kind: 'profile', chat: item.chat, phone, title, subtitle })
