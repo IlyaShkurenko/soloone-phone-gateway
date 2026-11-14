@@ -64,10 +64,23 @@ export async function sendSms(serial: string, to: string, text: string, onSendPr
   // Recorded before the tap: a crash in between leaves the attempt uncertain, never sent twice (PGW-3).
   await onSendPressed()
   await tap(serial, send)
+  let retaps = 0
   for (const started = Date.now(); Date.now() - started < CONFIRM_WAIT_MS; await sleep(1000)) {
-    const row = (await smsRows(serial, `type!=1 AND _id>${before}`)).find(item => samePhone(item.address, to) && sameText(item.body, text))
+    const rows = await smsRows(serial, `type!=1 AND _id>${before}`)
+    const row = rows.find(item => samePhone(item.address, to) && sameText(item.body, text))
     if (row?.type === 2) return
     if (row?.type === 5) throw new SendUncertain('The phone reported the SMS as failed')
+    // Contract: PGW-48 — Google Messages empties the compose field the moment it takes an SMS. Our text still in
+    // the field with no new outgoing row means the tap missed, so Send is tapped again; this cannot send twice.
+    if (!rows.length && retaps < 2 && Date.now() - started >= 3000) {
+      const now = await dumpUi(serial)
+      const field = find(now, { resourceId: COMPOSE_FIELD })
+      const again = find(now, { desc: 'Send SMS' })
+      if (field && again && sameText(field.text, text) && !(await smsRows(serial, `type!=1 AND _id>${before}`)).length) {
+        retaps++
+        await tap(serial, again)
+      }
+    }
   }
   throw new SendUncertain('The SMS was not confirmed as sent')
 }

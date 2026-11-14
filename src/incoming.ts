@@ -48,7 +48,7 @@ interface BackendEvent { id: string; kind: 'message' | 'tick' | 'outgoing' | 'st
 interface PhoneState {
   names: Map<string, string>
   profiled: Set<string>
-  profileQueue: Array<{ chat: string; phone: string }>
+  profileQueue: Array<{ chat: string; phone?: string; name?: string }>
   seen: Set<string>
   usedFiles: Set<string>
   pending: Array<PendingMedia & { event: BackendEvent }>
@@ -252,8 +252,8 @@ export function phoneFromName(name: string | undefined): string | undefined {
   return digits && /^\d{7,15}$/.test(digits) ? digits : undefined
 }
 
-function messageEvent(key: string, chat: string, message: { sender?: string; text: string; time: number }): BackendEvent {
-  const phone = phoneFromName(message.sender)
+function messageEvent(key: string, chat: string, message: { sender?: string; text: string; time: number }, known?: string): BackendEvent {
+  const phone = phoneFromName(message.sender) || known
   return { id: eventId(key), kind: 'message', chat, senderName: message.sender, text: message.text, time: message.time, ...(phone ? { phone } : {}) }
 }
 
@@ -278,11 +278,12 @@ async function pollNotifications(device: PhysicalDevice, serial: string, state: 
     // A sender with no known number is remembered by name; the chat header shows the same name (PGW-47).
     if (from || message.sender) remember(state, from || message.sender, message.text)
     await write(device.phone, { kind: 'message', source: 'notification', key, ...message, ...(kind ? { media: kind } : {}) })
-    const event = messageEvent(key, message.chat, message)
+    const event = messageEvent(key, message.chat, message, from)
     // Contract: PGW-35 — a sender the phone shows only by number gets its WhatsApp profile name read once.
+    // Contract: PGW-49 — a sender shown only by name, with no number known, gets the number read from the profile.
     const senderPhone = phoneFromName(message.sender)
-    if (senderPhone && !state.profiled.has(message.chat) && !state.profileQueue.some(item => item.chat === message.chat)) {
-      state.profileQueue.push({ chat: message.chat, phone: senderPhone })
+    if ((senderPhone || (!from && message.sender)) && !state.profiled.has(message.chat) && !state.profileQueue.some(item => item.chat === message.chat)) {
+      state.profileQueue.push(senderPhone ? { chat: message.chat, phone: senderPhone } : { chat: message.chat, name: message.sender })
     }
     // A media message waits for its file so the backend gets both together.
     if (kind) state.pending.push({ key, kind, time: message.time, event })
@@ -421,29 +422,62 @@ async function readMissedChat(device: PhysicalDevice, serial: string, to: string
   }
 }
 
-async function readProfile(device: PhysicalDevice, serial: string, state: PhoneState, item: { chat: string; phone: string }): Promise<void> {
+// Contract: PGW-49 — a chat known only by name is opened from the chat list, and only when one row has that name.
+async function openChatByName(serial: string, pkg: string, name: string): Promise<UiNode[] | undefined> {
+  await shell(serial, `input keyevent KEYCODE_WAKEUP; am start -W -f 0x10008000 -n ${pkg}/com.whatsapp.Main >/dev/null`, 30_000)
+  await sleep(1500)
+  let nodes = await dumpUi(serial)
+  const notNow = find(nodes, { text: 'NOT NOW' }) ?? find(nodes, { resourceId: 'com.whatsapp:id/gdrive_new_user_setup_not_now_btn' })
+  if (notNow) {
+    await tap(serial, notNow)
+    await sleep(1500)
+    nodes = await dumpUi(serial)
+  }
+  const rows = findAll(nodes, { resourceId: 'com.whatsapp:id/conversations_row_contact_name' }).filter(node => node.text === name)
+  if (rows.length !== 1) return undefined
+  await tap(serial, rows[0])
+  for (const until = Date.now() + 10_000; Date.now() < until; await sleep(700)) {
+    nodes = await dumpUi(serial)
+    if (find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact_name' })?.text === name) return nodes
+  }
+  return undefined
+}
+
+async function readProfile(device: PhysicalDevice, serial: string, state: PhoneState, item: { chat: string; phone?: string; name?: string }): Promise<void> {
   const pkg = whatsappPackage(device)
   let title: string | undefined
   let subtitle: string | undefined
+  let phone = item.phone
   let capture: ReturnType<typeof chatCapture> | undefined
   try {
-    await shell(serial, `input keyevent KEYCODE_WAKEUP; am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${item.phone}`)} -p ${quote(pkg)} >/dev/null`)
-    let header: UiNode | undefined
     let nodes: UiNode[] = []
-    for (const until = Date.now() + 12_000; !header && Date.now() < until; await sleep(800)) {
-      nodes = await dumpUi(serial)
-      header = find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact' })
+    if (item.phone) {
+      await shell(serial, `input keyevent KEYCODE_WAKEUP; am start -a android.intent.action.VIEW -d ${quote(`https://api.whatsapp.com/send?phone=${item.phone}`)} -p ${quote(pkg)} >/dev/null`)
+      for (const until = Date.now() + 12_000; !find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact' }) && Date.now() < until; await sleep(800)) {
+        nodes = await dumpUi(serial)
+      }
+    } else if (item.name) {
+      nodes = await openChatByName(serial, pkg, item.name) ?? []
     }
+    const header = find(nodes, { resourceId: 'com.whatsapp:id/conversation_contact' })
     if (!header) return
     // Contract: PGW-35 — while the chat is open its new messages raise no notification; they are read from the chat before leaving.
-    capture = chatCapture(device, item.phone, '')
-    capture.opened(nodes)
+    if (item.phone) {
+      capture = chatCapture(device, item.phone, '')
+      capture.opened(nodes)
+    }
     await tap(serial, header)
     for (const until = Date.now() + 10_000; !title && Date.now() < until; await sleep(800)) {
       const info = await dumpUi(serial)
       // A WhatsApp Business account shows its business name and number instead of the contact fields.
       title = find(info, { resourceId: 'com.whatsapp:id/contact_title' })?.text ?? find(info, { resourceId: 'com.whatsapp:id/business_title' })?.text
       subtitle = find(info, { resourceId: 'com.whatsapp:id/contact_subtitle' })?.text
+    }
+    // Contract: PGW-49 — a contact saved by name or shown by its profile name has its number as the subtitle.
+    phone ??= phoneFromName(subtitle) || phoneFromName(title)
+    if (!capture && phone) {
+      capture = chatCapture(device, phone, '')
+      capture.opened(nodes)
     }
   } finally {
     if (capture) {
@@ -461,8 +495,12 @@ async function readProfile(device: PhysicalDevice, serial: string, state: PhoneS
   const name = subtitle?.startsWith('~') ? subtitle : title && !phoneFromName(title) ? title : undefined
   state.profiled.add(item.chat)
   await writeFile(path.join(dir(), `profiled-${device.phone}.json`), JSON.stringify([...state.profiled]))
-  await write(device.phone, { kind: 'profile', chat: item.chat, phone: item.phone, title, subtitle })
-  if (name) await enqueue(device.phone, { id: eventId(`p|${item.chat}`), kind: 'profile', chat: item.chat, phone: item.phone, name })
+  await write(device.phone, { kind: 'profile', chat: item.chat, phone, title, subtitle })
+  if (item.name && phone && state.names.get(item.name) !== phone) {
+    state.names.set(item.name, phone)
+    await writeFile(path.join(dir(), `names-${device.phone}.json`), JSON.stringify(Object.fromEntries(state.names)))
+  }
+  if (name || (item.name && phone)) await enqueue(device.phone, { id: eventId(`p|${item.chat}`), kind: 'profile', chat: item.chat, ...(phone ? { phone } : {}), ...(name ? { name } : {}) })
 }
 
 function capturing(device: Device): PhysicalDevice | undefined {
