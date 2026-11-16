@@ -57,14 +57,36 @@ export const audioTitle = (name: string) => name.replace(/\.m4a$/, '')
 
 // The file name is derived from the backend message ID, so it is safe inside device shell quotes.
 export interface PreparedMedia {
+  messageId: string
   name: string
   localPath: string
   sourcePath: string
   mimeType: string
 }
 
-// Download and convert on the server. Independent of the phone, so it can overlap with connecting (PGW-15).
-export async function prepareMedia(messageId: string, media: {
+// Contract: PGW-15 — slow storage can make a download outlast one send request (2026-11-16: a 17 MB video took
+// 90 s), so the download of a message is shared: a retry of the same message waits for it or reuses its file.
+// A file not sent within KEEP_PREPARED_MS is removed.
+const DOWNLOAD_TIMEOUT_MS = 5 * 60_000
+const KEEP_PREPARED_MS = 30 * 60_000
+const preparing = new Map<string, Promise<PreparedMedia>>()
+
+// Download and convert on the server, before the phone is taken (PGW-15).
+export function prepareMedia(messageId: string, media: {
+  type: 'image' | 'video' | 'audio'; url: string; fileName: string; mimeType?: string
+}): Promise<PreparedMedia> {
+  const known = preparing.get(messageId)
+  if (known) return known
+  const promise = downloadAndConvert(messageId, media)
+  preparing.set(messageId, promise)
+  promise.then(
+    (prepared) => { setTimeout(() => { if (preparing.get(messageId) === promise) void discardPrepared(prepared) }, KEEP_PREPARED_MS).unref() },
+    () => { if (preparing.get(messageId) === promise) preparing.delete(messageId) }
+  )
+  return promise
+}
+
+async function downloadAndConvert(messageId: string, media: {
   type: 'image' | 'video' | 'audio'; url: string; fileName: string; mimeType?: string
 }): Promise<PreparedMedia> {
   const sourceMime = mimeFor(media.type, media.mimeType, media.fileName)
@@ -76,14 +98,16 @@ export async function prepareMedia(messageId: string, media: {
   const sourcePath = path.join(localDir, `${base}.source.${EXTENSIONS[sourceMime] || 'src'}`)
   const localPath = path.join(localDir, name)
 
-  let response: Response
+  let bytes: Buffer
   try {
-    response = await fetch(media.url, { signal: AbortSignal.timeout(30_000) })
-  } catch {
+    // The timeout covers reading the body too.
+    const response = await fetch(media.url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
+    if (!response.ok) throw new SendFailure(`Media download failed (HTTP ${response.status})`, response.status >= 500)
+    bytes = Buffer.from(await response.arrayBuffer())
+  } catch (error) {
+    if (error instanceof SendFailure) throw error
     throw new SendFailure('Could not download the media file', true)
   }
-  if (!response.ok) throw new SendFailure(`Media download failed (HTTP ${response.status})`, response.status >= 500)
-  const bytes = Buffer.from(await response.arrayBuffer())
   if (bytes.length === 0 || bytes.length > MAX_BYTES) throw new SendFailure('Media file is empty or too large', false)
 
   await mkdir(localDir, { recursive: true })
@@ -96,10 +120,11 @@ export async function prepareMedia(messageId: string, media: {
     await rm(sourcePath, { force: true })
     throw error
   }
-  return { name, localPath, sourcePath, mimeType }
+  return { messageId, name, localPath, sourcePath, mimeType }
 }
 
 export async function discardPrepared(prepared: PreparedMedia): Promise<void> {
+  preparing.delete(prepared.messageId)
   await rm(prepared.localPath, { force: true })
   await rm(prepared.sourcePath, { force: true })
 }

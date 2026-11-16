@@ -104,9 +104,9 @@ async function sendMessage(req: Request, res: Response): Promise<void> {
     if (!device) throw new SendFailure(`No phone is registered for ${from}`, false)
     script = await loadScript(request.media?.type === 'audio' ? 'send_audio' : request.media ? 'send_media' : 'send_text')
     const activeScript = script
-    // Download and convert while the phone is being started or connected.
+    // Download and convert before the phone is taken: a slow download must not hold the phone (PGW-15).
     const media = request.media ? { ...request.media, prepared: prepareMedia(request.messageId, request.media) } : undefined
-    media?.prepared?.catch(() => undefined)
+    if (media) await media.prepared
     const text = request.text && !request.media ? request.text : undefined
     const chatTag = `chat:${request.to}`
     const timing: Record<string, number> = {}

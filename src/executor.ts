@@ -2,7 +2,7 @@ import { quote, screenshot, shell, sleep, topActivity } from './adb.js'
 import { config } from './config.js'
 import { SendFailure, SendUncertain } from './errors.js'
 import { fastUiEnabled } from './fast-ui.js'
-import { audioTitle, discardPrepared, prepareMedia, stageMedia, type PreparedMedia, type StagedMedia } from './media.js'
+import { audioTitle, prepareMedia, stageMedia, type PreparedMedia, type StagedMedia } from './media.js'
 import { recoverOnce, type RecoveryAction } from './recovery.js'
 import type { Script, Step } from './scripts.js'
 import { clearFocusedInput, restoreKeyboard, typeText } from './typing.js'
@@ -616,7 +616,7 @@ export async function runScript(serial: string, script: Script, request: RunRequ
     // An error after Send can never be reported as a safe failure.
     throw new RunError(sendPressed && cause instanceof SendFailure ? new SendUncertain(cause.message) : cause, trace, evidence, screen)
   } finally {
-    if (!staged && request.media?.prepared) await request.media.prepared.then(discardPrepared).catch(() => undefined)
+    // A file that never reached the phone is kept for a retry of this message (PGW-15); a staged one is removed.
     await staged?.cleanup()
     if (options.beforeLeave) await options.beforeLeave(serial, sendPressed).catch(() => undefined)
     // Contract: PGW-11 — an open chat would mark new incoming messages as read; PGW-37 keeps it for a few seconds only.
