@@ -337,21 +337,26 @@ export async function runScript(serial: string, script: Script, request: RunRequ
             break
           }
           toggle ||= await locate(index, step, step.target!, entry)
-          if ((toggle.desc === onDesc) !== want) {
+          // A slow phone has left the toggle unchanged after a tap (2026-11-16), so it is read for a while and tapped
+          // once more. Still before Send: a late first tap undone by the second fails the check below.
+          let retapped = false
+          for (let attempt = 1; attempt <= 2 && toggle && (toggle.desc === onDesc) !== want; attempt++) {
+            retapped = attempt === 2
             await tapNode(toggle)
             await sleep(900)
             const nux = step.nux as Selector | undefined
-            nodes = await read(true)
-            const sheet = nux && find(nodes, nux)
+            const sheet = nux && find(await read(true), nux)
             if (sheet) {
               await tapNode(sheet)
               await sleep(700)
             }
-            nodes = await read(true)
-            toggle = find(nodes, step.target!)
+            for (const until = Date.now() + 3000; ; await sleep(500)) {
+              toggle = find(await read(true), step.target!)
+              if (!toggle || (toggle.desc === onDesc) === want || Date.now() >= until) break
+            }
           }
           if (!toggle || (toggle.desc === onDesc) !== want) throw new SendFailure('View Once state could not be confirmed', false)
-          entry.note = want ? 'View Once on' : 'View Once off'
+          entry.note = `${want ? 'View Once on' : 'View Once off'}${retapped ? ' after a second tap' : ''}`
           break
         }
         case 'check_recipient': {
