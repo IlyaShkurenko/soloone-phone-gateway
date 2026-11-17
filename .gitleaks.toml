@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+# Known false positives, each with a reason. gitleaks refuses an empty allowlist, so the table stays
+# commented out until the first entry is needed.
+# [allowlist]
+# description = "Known false positives, each with a reason"
+# regexes = ['''...''']   # with a comment saying why each one is not a secret
+# commits = ["..."]       # a past commit whose finding is a false positive, with the reason

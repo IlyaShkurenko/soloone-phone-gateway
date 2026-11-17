@@ -27,7 +27,7 @@ Moving a number to another phone means editing this file. The backend does not c
 
 ## CI and deploy
 
-Every push to `main` runs `npm run build` and `npm test` in GitHub Actions; a green run deploys to Hetzner over SSH (`.github/workflows/ci-and-deploy.yml`). The daily screen check runs on the test phone from Actions at 06:00 UTC (`.github/workflows/selftest.yml`) and fails the run when a step breaks. Both need the repository secrets `HETZNER_HOST`, `HETZNER_USER`, `HETZNER_SSH_KEY` and the variables `DEPLOY_ENABLED=true`, `SELFTEST_FROM`, `SELFTEST_TO`, `SELFTEST_REACT_TEXT`.
+Every push to `main` runs `npm run build`, `npm test` and `npm run gate` (type check, every test, secret scan) in GitHub Actions; a green run deploys to Hetzner over SSH (`.github/workflows/ci-and-deploy.yml`). The daily screen check runs on the test phone from Actions at 06:00 UTC (`.github/workflows/selftest.yml`) and fails the run when a step breaks. Both need the repository secrets `HETZNER_HOST`, `HETZNER_USER`, `HETZNER_SSH_KEY` and the variables `DEPLOY_ENABLED=true`, `SELFTEST_FROM`, `SELFTEST_TO`, `SELFTEST_REACT_TEXT`.
 
 ## Daily screen check
 

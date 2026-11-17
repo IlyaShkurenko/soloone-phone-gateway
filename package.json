@@ -9,7 +9,14 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "node --import tsx --test tests/*.test.ts",
-    "selftest": "node dist/selftest.js"
+    "selftest": "node dist/selftest.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "fails-first": "node scripts/fails-first.mjs",
+    "secret-scan": "node scripts/secret-scan.mjs",
+    "gate": "npm run typecheck && npm test && npm run secret-scan"
+  },
+  "config": {
+    "failsFirstCommand": "node --import tsx --test"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
